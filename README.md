@@ -1,7 +1,7 @@
 <div align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/logo_emerges_dark.gif">
-    <img src="assets/logo_emerges_light.gif" alt="splax" width="560">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo_emerges_dark.gif">
+    <img src="docs/assets/logo_emerges_light.gif" alt="splax" width="560">
   </picture>
 </div>
 

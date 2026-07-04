@@ -1,4 +1,4 @@
-"""Render assets/logo.svg from assets/logo_tiles.json.
+"""Render docs/assets/logo.svg from docs/assets/logo_tiles.json.
 
 The tile list is the canonical logo source, designed by hand in the lattice
 editor. Each tile is a face on the rhombille lattice the JAX wordmark uses
@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+
+ASSET_DIR = Path(__file__).resolve().parent
 
 LX = 25.0
 LY = 50.0 * math.sin(math.radians(60))
@@ -38,7 +40,7 @@ SW = 1.0
 
 
 def main() -> None:
-    tiles = json.loads(Path("assets/logo_tiles.json").read_text())["tiles"]
+    tiles = json.loads((ASSET_DIR / "logo_tiles.json").read_text())["tiles"]
     polys = []
     for t in tiles:
         pts = [(t["i"] * LX + ox, t["j"] * LY + oy) for ox, oy in SHAPES[t["t"]]]
@@ -59,7 +61,7 @@ def main() -> None:
         + "\n".join(body)
         + "\n</svg>\n"
     )
-    Path("assets/logo.svg").write_text(svg)
+    (ASSET_DIR / "logo.svg").write_text(svg)
     print(f"{len(polys)} tiles")
 
 
