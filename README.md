@@ -16,6 +16,7 @@
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Ruff](https://github.com/amacati/splax/actions/workflows/ruff.yml/badge.svg)](https://github.com/amacati/splax/actions/workflows/ruff.yml)
+[![Ty](https://github.com/amacati/splax/actions/workflows/ty.yml/badge.svg)](https://github.com/amacati/splax/actions/workflows/ty.yml)
 [![Docs](https://github.com/amacati/splax/actions/workflows/docs.yml/badge.svg)](https://amacati.github.io/splax)
 
 </div>

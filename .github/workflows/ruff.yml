@@ -9,7 +9,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/ruff-action@v3
-      - uses: astral-sh/setup-uv@v6
-      # Type check the library (dependencies installed so ty resolves imports;
-      # the lint group pins ty, heavy test deps are skipped).
-      - run: uv run --no-default-groups --group lint ty check splax
+

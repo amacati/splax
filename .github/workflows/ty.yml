@@ -1,0 +1,13 @@
+name: Ty
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  ty-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      # Type check the library with only the lint dependency group.
+      - run: uv run --no-default-groups --group lint ty check splax
