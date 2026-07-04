@@ -146,7 +146,7 @@ _PACK_KEYS = os.environ.get("SPLAX_PACK_KEYS", "1") == "1"
 _POSTSYNC_GRAPHS = os.environ.get("SPLAX_POSTSYNC_GRAPHS", "0") == "1"
 _GRAPH_THRESHOLD = int(os.environ.get("SPLAX_GRAPH_THRESHOLD", "2000000"))
 _GRAPH_BUCKET_STEP = 1.05  # geometric bucket granularity (~5% pad worst case)
-_graph_cache: dict = {}    # (device, key-tuple) -> wp.Graph
+_graph_cache: dict = {}  # (device, key-tuple) -> wp.Graph
 
 # --- Split-heavy-tile load balancing (phase 8t), inference-only, opt-in --------
 # The one-block-per-tile blend makes frame time follow the HEAVIEST tile's
@@ -180,8 +180,9 @@ def _bucket_count(ni: int) -> int:
     if ni <= 1:
         return max(ni, 1)
     import math
+
     k = math.ceil(math.log(ni) / math.log(_GRAPH_BUCKET_STEP))
-    return max(ni, int(math.ceil(_GRAPH_BUCKET_STEP ** k)))
+    return max(ni, int(math.ceil(_GRAPH_BUCKET_STEP**k)))
 
 
 def clear_graph_cache() -> None:
@@ -189,8 +190,13 @@ def clear_graph_cache() -> None:
     _graph_cache.clear()
 
 
-def _get_scratch(device: wp.Device | None, sig: tuple, isect_need: int, bins_need: int,
-                 isect_dtype: type = wp.int64) -> dict:
+def _get_scratch(
+    device: wp.Device | None,
+    sig: tuple,
+    isect_need: int,
+    bins_need: int,
+    isect_dtype: type = wp.int64,
+) -> dict:
     key = str(device)  # wp.Device is unhashable; its string alias is stable per device
     entry = _scratch_cache.get(key)
     if entry is None or entry["sig"] != sig:
@@ -495,7 +501,9 @@ def _map_gaussian_to_intersects_p32(
     depth_q = wp.int32(0)
     if drange > 0.0:
         f = (depths[idx] - dmin) / drange
-        depth_q = wp.clamp(wp.int32(f * maxq), wp.int32(0), (wp.int32(1) << depth_bits) - wp.int32(1))
+        depth_q = wp.clamp(
+            wp.int32(f * maxq), wp.int32(0), (wp.int32(1) << depth_bits) - wp.int32(1)
+        )
     # image id occupies the field above (tile_n_bits + depth_bits).
     iid_enc = bid << (depth_bits + tile_n_bits)
 
@@ -1567,11 +1575,24 @@ def _rasterize_fwd_cta64_unrolled(
             out_img[row3, out_x] = wp.vec3(pr3, pg3, pb3) + T3 * bg
 
 
-def _sort_and_bin(device: wp.Device | None, xys: wp.array, depths: wp.array, radii: wp.array,
-                  conics: wp.array, map_opacities: wp.array,
-                  cum_tiles_hit: wp.array, n: int, B: int, tight: int, opac_mod: int,
-                  tile_bounds_x: int, tile_bounds_y: int, num_tiles: int, bw: int,
-                  num_intersects: int | None = None) -> tuple[wp.array, wp.array, int]:
+def _sort_and_bin(
+    device: wp.Device | None,
+    xys: wp.array,
+    depths: wp.array,
+    radii: wp.array,
+    conics: wp.array,
+    map_opacities: wp.array,
+    cum_tiles_hit: wp.array,
+    n: int,
+    B: int,
+    tight: int,
+    opac_mod: int,
+    tile_bounds_x: int,
+    tile_bounds_y: int,
+    num_tiles: int,
+    bw: int,
+    num_intersects: int | None = None,
+) -> tuple[wp.array, wp.array, int]:
     """Shared intersection sort + tile-bin build (survey O1/O3).
 
     Emits per-(image, tile, gaussian) 64-bit keys, one global stable radix sort,
@@ -1623,14 +1644,32 @@ def _sort_and_bin(device: wp.Device | None, xys: wp.array, depths: wp.array, rad
             # depth quantization -- no host sync (result stays in a device array).
             depth_mm = scratch["depth_mm"]
             wp.launch(_seed_minmax, dim=B, inputs=[depth_mm], device=device)
-            wp.launch(_depth_minmax, dim=(total + int(_MINMAX_CHUNK) - 1) // int(_MINMAX_CHUNK),
-                      inputs=[depths, radii, total, n, depth_mm], device=device)
+            wp.launch(
+                _depth_minmax,
+                dim=(total + int(_MINMAX_CHUNK) - 1) // int(_MINMAX_CHUNK),
+                inputs=[depths, radii, total, n, depth_mm],
+                device=device,
+            )
             wp.launch(
                 _map_gaussian_to_intersects_p32,
                 dim=total,
-                inputs=[xys, depths, radii, conics, map_opacities,
-                        cum_tiles_hit, depth_mm, n, opac_mod, tight, tile_n_bits,
-                        depth_bits, tile_bounds_x, tile_bounds_y, bw],
+                inputs=[
+                    xys,
+                    depths,
+                    radii,
+                    conics,
+                    map_opacities,
+                    cum_tiles_hit,
+                    depth_mm,
+                    n,
+                    opac_mod,
+                    tight,
+                    tile_n_bits,
+                    depth_bits,
+                    tile_bounds_x,
+                    tile_bounds_y,
+                    bw,
+                ],
                 outputs=[isect_ids, gaussian_ids],
                 device=device,
             )
@@ -1646,9 +1685,21 @@ def _sort_and_bin(device: wp.Device | None, xys: wp.array, depths: wp.array, rad
             wp.launch(
                 _map_gaussian_to_intersects,
                 dim=total,
-                inputs=[xys, depths.view(wp.int32), radii, conics, map_opacities,
-                        cum_tiles_hit, n, opac_mod, tight, tile_n_bits,
-                        tile_bounds_x, tile_bounds_y, bw],
+                inputs=[
+                    xys,
+                    depths.view(wp.int32),
+                    radii,
+                    conics,
+                    map_opacities,
+                    cum_tiles_hit,
+                    n,
+                    opac_mod,
+                    tight,
+                    tile_n_bits,
+                    tile_bounds_x,
+                    tile_bounds_y,
+                    bw,
+                ],
                 outputs=[isect_ids, gaussian_ids],
                 device=device,
             )
@@ -1666,11 +1717,22 @@ def _sort_and_bin(device: wp.Device | None, xys: wp.array, depths: wp.array, rad
     return gaussian_ids, tile_bins, num_intersects
 
 
-def _blend_setup(colors: wp.array, xys: wp.array, depths: wp.array, radii: wp.array,
-                 conics: wp.array, map_opacities: wp.array, cum_tiles_hit: wp.array,
-                 n: int, B_geom: int, tight: int, img_h: int, img_w: int,
-                 block_width: int, num_intersects: int | None = None
-                 ) -> tuple[wp.array, wp.array, int, int, int]:
+def _blend_setup(
+    colors: wp.array,
+    xys: wp.array,
+    depths: wp.array,
+    radii: wp.array,
+    conics: wp.array,
+    map_opacities: wp.array,
+    cum_tiles_hit: wp.array,
+    n: int,
+    B_geom: int,
+    tight: int,
+    img_h: int,
+    img_w: int,
+    block_width: int,
+    num_intersects: int | None = None,
+) -> tuple[wp.array, wp.array, int, int, int]:
     """Shared blend-launcher preamble: tile geometry + the sort/bin build.
 
     ``B_geom`` is the geometry batch (how many distinct renders the sort/bin
@@ -1678,26 +1740,57 @@ def _blend_setup(colors: wp.array, xys: wp.array, depths: wp.array, radii: wp.ar
     (graph-eligibility check), avoiding a redundant host readback. Returns
     (gaussian_ids, tile_bins, num_intersects, tile_bounds_x, num_tiles).
     """
-    assert block_width == 16, "cooperative blend kernel is specialized for block_width=16"
+    assert block_width == 16, (
+        "cooperative blend kernel is specialized for block_width=16"
+    )
     tile_bounds_x = (img_w + block_width - 1) // block_width
     tile_bounds_y = (img_h + block_width - 1) // block_width
     num_tiles = tile_bounds_x * tile_bounds_y
     gaussian_ids, tile_bins, num_intersects = _sort_and_bin(
-        colors.device, xys, depths, radii, conics, map_opacities, cum_tiles_hit,
-        n, B_geom, tight, map_opacities.shape[0],
-        tile_bounds_x, tile_bounds_y, num_tiles, block_width, num_intersects,
+        colors.device,
+        xys,
+        depths,
+        radii,
+        conics,
+        map_opacities,
+        cum_tiles_hit,
+        n,
+        B_geom,
+        tight,
+        map_opacities.shape[0],
+        tile_bounds_x,
+        tile_bounds_y,
+        num_tiles,
+        block_width,
+        num_intersects,
     )
     return gaussian_ids, tile_bins, num_intersects, tile_bounds_x, num_tiles
 
 
-def _forward_graph(colors: wp.array, opacities: wp.array, map_opacities: wp.array,
-                   background: wp.array, xys: wp.array, depths: wp.array,
-                   radii: wp.array, conics: wp.array, cum_tiles_hit: wp.array,
-                   n: int, B: int, img_h: int, img_w: int, block_width: int,
-                   tight: int, tile_bounds_x: int, tile_bounds_y: int, num_tiles: int,
-                   sel_bg: int, final_Ts: wp.array2d[wp.float32],
-                   final_idx: wp.array2d[wp.int32],
-                   out_img: wp.array2d[wp.vec3]) -> tuple[bool, int | None]:
+def _forward_graph(
+    colors: wp.array,
+    opacities: wp.array,
+    map_opacities: wp.array,
+    background: wp.array,
+    xys: wp.array,
+    depths: wp.array,
+    radii: wp.array,
+    conics: wp.array,
+    cum_tiles_hit: wp.array,
+    n: int,
+    B: int,
+    img_h: int,
+    img_w: int,
+    block_width: int,
+    tight: int,
+    tile_bounds_x: int,
+    tile_bounds_y: int,
+    num_tiles: int,
+    sel_bg: int,
+    final_Ts: wp.array2d[wp.float32],
+    final_idx: wp.array2d[wp.int32],
+    out_img: wp.array2d[wp.vec3],
+) -> tuple[bool, int | None]:
     """Captured-graph forward path (phase 8s).
 
     Returns (handled, num_intersects). ``handled`` is True if a graph replayed the
@@ -1731,7 +1824,12 @@ def _forward_graph(colors: wp.array, opacities: wp.array, map_opacities: wp.arra
     total = B * n
     # single host readback (reused by the caller's plain path on a fallback).
     num_intersects = int(cum_tiles_hit[total - 1 : total].numpy()[0])
-    if _USE_CTA64 or not packed or num_intersects <= 0 or num_intersects >= _GRAPH_THRESHOLD:
+    if (
+        _USE_CTA64
+        or not packed
+        or num_intersects <= 0
+        or num_intersects >= _GRAPH_THRESHOLD
+    ):
         return False, num_intersects
 
     bucket = _bucket_count(num_intersects)
@@ -1750,35 +1848,105 @@ def _forward_graph(colors: wp.array, opacities: wp.array, map_opacities: wp.arra
         # leaving the [count, bucket) tail as 0x7FFFFFFF -- sorts to the very tail.
         isect_ids[:bucket].fill_(0x7FFFFFFF)
         wp.launch(_seed_minmax, dim=B, inputs=[depth_mm], device=device)
-        wp.launch(_depth_minmax, dim=(total + int(_MINMAX_CHUNK) - 1) // int(_MINMAX_CHUNK),
-                  inputs=[depths, radii, total, n, depth_mm], device=device)
-        wp.launch(_map_gaussian_to_intersects_p32, dim=total,
-                  inputs=[xys, depths, radii, conics, map_opacities, cum_tiles_hit,
-                          depth_mm, n, map_opacities.shape[0], tight, tile_n_bits,
-                          depth_bits, tile_bounds_x, tile_bounds_y, block_width],
-                  outputs=[isect_ids[:2 * bucket], gaussian_ids[:2 * bucket]],
-                  device=device)
-        wp.utils.radix_sort_pairs(isect_ids[:2 * bucket], gaussian_ids[:2 * bucket], bucket)
-        wp.launch(_get_tile_bin_edges_p32_dev, dim=bucket,
-                  inputs=[cum_tiles_hit, total - 1, isect_ids[:2 * bucket], num_tiles,
-                          tile_n_bits, depth_bits],
-                  outputs=[tile_bins], device=device)
-        wp.launch_tiled(_rasterize_fwd, dim=[B * num_tiles],
-                        inputs=[img_h, img_w, tile_bounds_x, num_tiles, colors.shape[0],
-                                opacities.shape[0], sel_bg, gaussian_ids[:2 * bucket],
-                                tile_bins, xys, conics, colors, opacities, background],
-                        outputs=[final_Ts, final_idx, out_img],
-                        block_dim=int(BLOCK_SIZE), device=device)
+        wp.launch(
+            _depth_minmax,
+            dim=(total + int(_MINMAX_CHUNK) - 1) // int(_MINMAX_CHUNK),
+            inputs=[depths, radii, total, n, depth_mm],
+            device=device,
+        )
+        wp.launch(
+            _map_gaussian_to_intersects_p32,
+            dim=total,
+            inputs=[
+                xys,
+                depths,
+                radii,
+                conics,
+                map_opacities,
+                cum_tiles_hit,
+                depth_mm,
+                n,
+                map_opacities.shape[0],
+                tight,
+                tile_n_bits,
+                depth_bits,
+                tile_bounds_x,
+                tile_bounds_y,
+                block_width,
+            ],
+            outputs=[isect_ids[: 2 * bucket], gaussian_ids[: 2 * bucket]],
+            device=device,
+        )
+        wp.utils.radix_sort_pairs(
+            isect_ids[: 2 * bucket], gaussian_ids[: 2 * bucket], bucket
+        )
+        wp.launch(
+            _get_tile_bin_edges_p32_dev,
+            dim=bucket,
+            inputs=[
+                cum_tiles_hit,
+                total - 1,
+                isect_ids[: 2 * bucket],
+                num_tiles,
+                tile_n_bits,
+                depth_bits,
+            ],
+            outputs=[tile_bins],
+            device=device,
+        )
+        wp.launch_tiled(
+            _rasterize_fwd,
+            dim=[B * num_tiles],
+            inputs=[
+                img_h,
+                img_w,
+                tile_bounds_x,
+                num_tiles,
+                colors.shape[0],
+                opacities.shape[0],
+                sel_bg,
+                gaussian_ids[: 2 * bucket],
+                tile_bins,
+                xys,
+                conics,
+                colors,
+                opacities,
+                background,
+            ],
+            outputs=[final_Ts, final_idx, out_img],
+            block_dim=int(BLOCK_SIZE),
+            device=device,
+        )
 
     # .ptr is already an int for live device arrays (no int() -- the warp stubs
     # type it as optional, and the raw value keys the cache identically).
-    key = (str(device), B, n, num_tiles, img_h, img_w, colors.shape[0],
-           opacities.shape[0], map_opacities.shape[0], sel_bg, tight, bucket, gen,
-           xys.ptr, depths.ptr, radii.ptr, conics.ptr,
-           cum_tiles_hit.ptr, colors.ptr, opacities.ptr,
-           map_opacities.ptr, background.ptr,
-           cast(wp.array, out_img).ptr, cast(wp.array, final_Ts).ptr,
-           cast(wp.array, final_idx).ptr)
+    key = (
+        str(device),
+        B,
+        n,
+        num_tiles,
+        img_h,
+        img_w,
+        colors.shape[0],
+        opacities.shape[0],
+        map_opacities.shape[0],
+        sel_bg,
+        tight,
+        bucket,
+        gen,
+        xys.ptr,
+        depths.ptr,
+        radii.ptr,
+        conics.ptr,
+        cum_tiles_hit.ptr,
+        colors.ptr,
+        opacities.ptr,
+        map_opacities.ptr,
+        background.ptr,
+        cast(wp.array, out_img).ptr,
+        cast(wp.array, final_Ts).ptr,
+        cast(wp.array, final_idx).ptr,
+    )
     graph = _graph_cache.get(key)
     if graph is None:
         run()  # warm: load modules + allocate cub temp for `bucket` before capture
@@ -1831,9 +1999,29 @@ def _rasterize_launch(
         tbx = (img_w + block_width - 1) // block_width
         tby = (img_h + block_width - 1) // block_width
         handled, ni_pre = _forward_graph(
-            colors, opacities, map_opacities, background, xys, depths, radii, conics,
-            cum_tiles_hit, n, B, img_h, img_w, block_width, tight, tbx, tby,
-            tbx * tby, sel_bg, final_Ts, final_idx, out_img)
+            colors,
+            opacities,
+            map_opacities,
+            background,
+            xys,
+            depths,
+            radii,
+            conics,
+            cum_tiles_hit,
+            n,
+            B,
+            img_h,
+            img_w,
+            block_width,
+            tight,
+            tbx,
+            tby,
+            tbx * tby,
+            sel_bg,
+            final_Ts,
+            final_idx,
+            out_img,
+        )
         if handled:
             return
 
@@ -1841,8 +2029,20 @@ def _rasterize_launch(
     # with); the blend below uses opacities (ρ-compensated in antialiased mode). When
     # not antialiased the caller passes map_opacities == opacities, so this is a no-op.
     gaussian_ids, tile_bins, _num_isect, tile_bounds_x, num_tiles = _blend_setup(
-        colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit,
-        n, B, tight, img_h, img_w, block_width, ni_pre,
+        colors,
+        xys,
+        depths,
+        radii,
+        conics,
+        map_opacities,
+        cum_tiles_hit,
+        n,
+        B,
+        tight,
+        img_h,
+        img_w,
+        block_width,
+        ni_pre,
     )
 
     # One block per (image, tile); dim = B*num_tiles. The CTA variant is chosen by
@@ -1860,9 +2060,22 @@ def _rasterize_launch(
     wp.launch_tiled(
         kernel,
         dim=[B * num_tiles],
-        inputs=[img_h, img_w, tile_bounds_x, num_tiles, colors.shape[0],
-                opacities.shape[0], sel_bg, gaussian_ids, tile_bins,
-                xys, conics, colors, opacities, background],
+        inputs=[
+            img_h,
+            img_w,
+            tile_bounds_x,
+            num_tiles,
+            colors.shape[0],
+            opacities.shape[0],
+            sel_bg,
+            gaussian_ids,
+            tile_bins,
+            xys,
+            conics,
+            colors,
+            opacities,
+            background,
+        ],
         outputs=[final_Ts, final_idx, out_img],
         block_dim=block_dim,
         device=colors.device,
@@ -1884,8 +2097,9 @@ _rasterize_ffi = jax_callable(
 
 
 # --- Split-heavy-tile inference blend (phase 8t) ------------------------------
-def _get_split_scratch(device: wp.Device | None, sig: tuple, seg_cap: int, split_cap: int,
-                       kcap: int) -> dict:
+def _get_split_scratch(
+    device: wp.Device | None, sig: tuple, seg_cap: int, split_cap: int, kcap: int
+) -> dict:
     """Grow-only, signature-keyed scratch for the tile-split blend (mirrors
     _get_scratch's HWM policy). Buffers grow with the running-max segment/split
     counts (data-dependent per viewpoint) and are dropped when the workload
@@ -1895,8 +2109,13 @@ def _get_split_scratch(device: wp.Device | None, sig: tuple, seg_cap: int, split
     entry = _split_scratch_cache.get(key)
     if entry is None or entry["sig"] != sig or entry["kcap"] != kcap:
         _split_scratch_cache.pop(key, None)
-        entry = {"sig": sig, "kcap": kcap, "seg_cap": 0, "split_cap": 0,
-                 "counters": wp.zeros(2, dtype=wp.int32, device=device)}
+        entry = {
+            "sig": sig,
+            "kcap": kcap,
+            "seg_cap": 0,
+            "split_cap": 0,
+            "counters": wp.zeros(2, dtype=wp.int32, device=device),
+        }
         _split_scratch_cache[key] = entry
     if entry["seg_cap"] < seg_cap:
         cap = max(int(seg_cap * _SCRATCH_HEADROOM) + 1, entry["seg_cap"])
@@ -1907,8 +2126,12 @@ def _get_split_scratch(device: wp.Device | None, sig: tuple, seg_cap: int, split
         cap = max(int(split_cap * _SCRATCH_HEADROOM) + 1, entry["split_cap"])
         entry["split_tile_g"] = wp.empty(cap, dtype=wp.int32, device=device)
         entry["split_k"] = wp.empty(cap, dtype=wp.int32, device=device)
-        entry["slot_c"] = wp.empty(cap * kcap * int(BLOCK_SIZE), dtype=wp.vec3, device=device)
-        entry["slot_t"] = wp.empty(cap * kcap * int(BLOCK_SIZE), dtype=wp.float32, device=device)
+        entry["slot_c"] = wp.empty(
+            cap * kcap * int(BLOCK_SIZE), dtype=wp.vec3, device=device
+        )
+        entry["slot_t"] = wp.empty(
+            cap * kcap * int(BLOCK_SIZE), dtype=wp.float32, device=device
+        )
         entry["split_cap"] = cap
     return entry
 
@@ -1947,8 +2170,20 @@ def _rasterize_split_launch(
     opac_mod = opacities.shape[0]
 
     gaussian_ids, tile_bins, num_intersects, tile_bounds_x, num_tiles = _blend_setup(
-        colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit,
-        n, B, tight, img_h, img_w, block_width, None,
+        colors,
+        xys,
+        depths,
+        radii,
+        conics,
+        map_opacities,
+        cum_tiles_hit,
+        n,
+        B,
+        tight,
+        img_h,
+        img_w,
+        block_width,
+        None,
     )
     n_bins = B * num_tiles
     thr = _SPLIT_THRESHOLD
@@ -1960,8 +2195,23 @@ def _rasterize_split_launch(
     wp.launch_tiled(
         _rasterize_fwd_unsplit,
         dim=[n_bins],
-        inputs=[img_h, img_w, tile_bounds_x, num_tiles, color_mod, opac_mod, sel_bg,
-                thr, gaussian_ids, tile_bins, xys, conics, colors, opacities, background],
+        inputs=[
+            img_h,
+            img_w,
+            tile_bounds_x,
+            num_tiles,
+            color_mod,
+            opac_mod,
+            sel_bg,
+            thr,
+            gaussian_ids,
+            tile_bins,
+            xys,
+            conics,
+            colors,
+            opacities,
+            background,
+        ],
         outputs=[out_img],
         block_dim=int(BLOCK_SIZE),
         device=device,
@@ -1982,19 +2232,46 @@ def _rasterize_split_launch(
     wp.launch(
         _plan_tile_split,
         dim=n_bins,
-        inputs=[tile_bins, n_bins, thr, kcap, sc["seg_cap"], sc["split_cap"],
-                counters[0:1], counters[1:2], sc["split_tile_g"], sc["split_k"],
-                sc["seg_tile_g"], sc["seg_start"], sc["seg_end"],
-                sc["seg_split_idx"], sc["seg_ord"]],
+        inputs=[
+            tile_bins,
+            n_bins,
+            thr,
+            kcap,
+            sc["seg_cap"],
+            sc["split_cap"],
+            counters[0:1],
+            counters[1:2],
+            sc["split_tile_g"],
+            sc["split_k"],
+            sc["seg_tile_g"],
+            sc["seg_start"],
+            sc["seg_end"],
+            sc["seg_split_idx"],
+            sc["seg_ord"],
+        ],
         device=device,
     )
     wp.launch_tiled(
         _rasterize_fwd_seg,
         dim=[sc["seg_cap"]],
-        inputs=[color_mod, opac_mod, kcap, counters[1:2], sc["seg_tile_g"],
-                sc["seg_start"], sc["seg_end"], sc["seg_split_idx"], sc["seg_ord"],
-                gaussian_ids, xys, conics, colors, opacities,
-                tile_bounds_x, num_tiles],
+        inputs=[
+            color_mod,
+            opac_mod,
+            kcap,
+            counters[1:2],
+            sc["seg_tile_g"],
+            sc["seg_start"],
+            sc["seg_end"],
+            sc["seg_split_idx"],
+            sc["seg_ord"],
+            gaussian_ids,
+            xys,
+            conics,
+            colors,
+            opacities,
+            tile_bounds_x,
+            num_tiles,
+        ],
         outputs=[sc["slot_c"], sc["slot_t"]],
         block_dim=int(BLOCK_SIZE),
         device=device,
@@ -2002,9 +2279,20 @@ def _rasterize_split_launch(
     wp.launch(
         _composite_tile_split,
         dim=sc["split_cap"] * int(BLOCK_SIZE),
-        inputs=[img_h, img_w, tile_bounds_x, num_tiles, sel_bg, kcap,
-                counters[0:1], sc["split_tile_g"], sc["split_k"],
-                sc["slot_c"], sc["slot_t"], background],
+        inputs=[
+            img_h,
+            img_w,
+            tile_bounds_x,
+            num_tiles,
+            sel_bg,
+            kcap,
+            counters[0:1],
+            sc["split_tile_g"],
+            sc["split_k"],
+            sc["slot_c"],
+            sc["slot_t"],
+            background,
+        ],
         outputs=[out_img],
         device=device,
     )
@@ -2018,23 +2306,42 @@ _rasterize_split_ffi = jax_callable(
 )
 
 
-def _rasterize_split_call(colors: jax.Array, opacities: jax.Array,
-                          background: jax.Array, xys: jax.Array, depths: jax.Array,
-                          radii: jax.Array, conics: jax.Array,
-                          cum_tiles_hit: jax.Array, n: int, H: int, W: int,
-                          block_width: int, tight: bool,
-                          map_opacities: jax.Array | None = None) -> jax.Array:
+def _rasterize_split_call(
+    colors: jax.Array,
+    opacities: jax.Array,
+    background: jax.Array,
+    xys: jax.Array,
+    depths: jax.Array,
+    radii: jax.Array,
+    conics: jax.Array,
+    cum_tiles_hit: jax.Array,
+    n: int,
+    H: int,
+    W: int,
+    block_width: int,
+    tight: bool,
+    map_opacities: jax.Array | None = None,
+) -> jax.Array:
     """Inference-only split blend entry (phase 8t): returns just the image (the
     final_Ts/final_idx outputs mirror _rasterize_call's shape convention and are
     discarded)."""
     if map_opacities is None:
         map_opacities = opacities
     _final_Ts, _final_idx, out_img = _rasterize_split_ffi(
-        colors, opacities.reshape(n), map_opacities.reshape(n),
-        background.reshape(1, 3), xys, depths.reshape(n),
-        radii.reshape(n).astype(jnp.int32), conics,
+        colors,
+        opacities.reshape(n),
+        map_opacities.reshape(n),
+        background.reshape(1, 3),
+        xys,
+        depths.reshape(n),
+        radii.reshape(n).astype(jnp.int32),
+        conics,
         cum_tiles_hit.reshape(n).astype(jnp.int32),
-        int(n), int(H), int(W), int(block_width), int(tight),
+        int(n),
+        int(H),
+        int(W),
+        int(block_width),
+        int(tight),
         output_dims=(H, W),
     )
     return out_img
@@ -2070,16 +2377,41 @@ def _rasterize_depth_launch(
     sel_bg = 1 if background.shape[0] > 1 else 0
 
     gaussian_ids, tile_bins, _num_isect, tile_bounds_x, num_tiles = _blend_setup(
-        colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit,
-        n, B, tight, img_h, img_w, block_width,
+        colors,
+        xys,
+        depths,
+        radii,
+        conics,
+        map_opacities,
+        cum_tiles_hit,
+        n,
+        B,
+        tight,
+        img_h,
+        img_w,
+        block_width,
     )
 
     wp.launch_tiled(
         _rasterize_fwd_depth,
         dim=[B * num_tiles],
-        inputs=[img_h, img_w, tile_bounds_x, num_tiles, colors.shape[0],
-                opacities.shape[0], sel_bg, gaussian_ids, tile_bins,
-                xys, conics, colors, opacities, background, depths],
+        inputs=[
+            img_h,
+            img_w,
+            tile_bounds_x,
+            num_tiles,
+            colors.shape[0],
+            opacities.shape[0],
+            sel_bg,
+            gaussian_ids,
+            tile_bins,
+            xys,
+            conics,
+            colors,
+            opacities,
+            background,
+            depths,
+        ],
         outputs=[final_Ts, final_idx, out_img, out_depth],
         block_dim=int(BLOCK_SIZE),
         device=colors.device,
@@ -2175,7 +2507,9 @@ def _rasterize_bwd_kernel(
     bin_final = final_idx[frow, j]
     t_final = final_Ts[frow, j]  # transmittance after the last contributing gaussian
     T = t_final
-    v_out = v_out_img[(image_id * img_h + i) % vout_rows, j]  # cotangent row (B_out*H) or bcast
+    v_out = v_out_img[
+        (image_id * img_h + i) % vout_rows, j
+    ]  # cotangent row (B_out*H) or bcast
     bg = background[image_id * sel_bg]  # sel_bg==0 -> row 0 (broadcast background)
     buffer = wp.vec3(0.0, 0.0, 0.0)
 
@@ -2411,7 +2745,9 @@ def _rasterize_bwd_reduce_kernel(
     tile_g, tr = wp.tid()
     image_id = tile_g // num_tiles
     tile_local = tile_g % num_tiles
-    geom_image = image_id * sel_geom  # geometry image (== image_id when batched, else 0)
+    geom_image = (
+        image_id * sel_geom
+    )  # geometry image (== image_id when batched, else 0)
     og_base = image_id * num_gaussians * (1 - sel_geom)  # per-output grad slot base
     tile_x = tile_local % tile_bounds_x
     tile_y = tile_local // tile_bounds_x
@@ -2546,8 +2882,19 @@ def _rasterize_bwd_launch(
     vout_rows = v_out_img.shape[0]
 
     gaussian_ids, tile_bins, num_intersects, tile_bounds_x, num_tiles = _blend_setup(
-        colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit,
-        n, B_geom, tight, img_h, img_w, block_width,
+        colors,
+        xys,
+        depths,
+        radii,
+        conics,
+        map_opacities,
+        cum_tiles_hit,
+        n,
+        B_geom,
+        tight,
+        img_h,
+        img_w,
+        block_width,
     )
 
     # atomics accumulate -> outputs must start at zero (memset equivalent).
@@ -2561,10 +2908,28 @@ def _rasterize_bwd_launch(
     wp.launch_tiled(
         kernel,
         dim=[B_out * num_tiles],
-        inputs=[img_h, img_w, tile_bounds_x, num_tiles, n, sel_geom,
-                colors.shape[0], opacities.shape[0], sel_bg, vout_rows,
-                gaussian_ids, tile_bins, xys, conics, colors, opacities,
-                background, final_Ts, final_idx, v_out_img],
+        inputs=[
+            img_h,
+            img_w,
+            tile_bounds_x,
+            num_tiles,
+            n,
+            sel_geom,
+            colors.shape[0],
+            opacities.shape[0],
+            sel_bg,
+            vout_rows,
+            gaussian_ids,
+            tile_bins,
+            xys,
+            conics,
+            colors,
+            opacities,
+            background,
+            final_Ts,
+            final_idx,
+            v_out_img,
+        ],
         outputs=[v_xy, v_conic, v_colors, v_opacity],
         block_dim=int(BLOCK_SIZE),
         device=colors.device,
@@ -2621,8 +2986,19 @@ def _rasterize_bwd_depth_launch(
     vdepth_rows = v_out_depth.shape[0]
 
     gaussian_ids, tile_bins, num_intersects, tile_bounds_x, num_tiles = _blend_setup(
-        colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit,
-        n, B_geom, tight, img_h, img_w, block_width,
+        colors,
+        xys,
+        depths,
+        radii,
+        conics,
+        map_opacities,
+        cum_tiles_hit,
+        n,
+        B_geom,
+        tight,
+        img_h,
+        img_w,
+        block_width,
     )
 
     v_colors.zero_()
@@ -2635,10 +3011,31 @@ def _rasterize_bwd_depth_launch(
     wp.launch_tiled(
         _rasterize_bwd_depth_kernel,
         dim=[B_out * num_tiles],
-        inputs=[img_h, img_w, tile_bounds_x, num_tiles, n, sel_geom,
-                colors.shape[0], opacities.shape[0], sel_bg, vout_rows, vdepth_rows,
-                gaussian_ids, tile_bins, xys, conics, colors, opacities,
-                background, depths, final_Ts, final_idx, v_out_img, v_out_depth],
+        inputs=[
+            img_h,
+            img_w,
+            tile_bounds_x,
+            num_tiles,
+            n,
+            sel_geom,
+            colors.shape[0],
+            opacities.shape[0],
+            sel_bg,
+            vout_rows,
+            vdepth_rows,
+            gaussian_ids,
+            tile_bins,
+            xys,
+            conics,
+            colors,
+            opacities,
+            background,
+            depths,
+            final_Ts,
+            final_idx,
+            v_out_img,
+            v_out_depth,
+        ],
         outputs=[v_xy, v_conic, v_colors, v_opacity, v_depths],
         block_dim=int(BLOCK_SIZE),
         device=colors.device,
@@ -2653,12 +3050,22 @@ _rasterize_bwd_depth_ffi = jax_callable(
 )
 
 
-def _rasterize_call(colors: jax.Array, opacities: jax.Array, background: jax.Array,
-                    xys: jax.Array, depths: jax.Array, radii: jax.Array,
-                    conics: jax.Array, cum_tiles_hit: jax.Array, n: int, H: int,
-                    W: int, block_width: int, tight: bool,
-                    map_opacities: jax.Array | None = None
-                    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+def _rasterize_call(
+    colors: jax.Array,
+    opacities: jax.Array,
+    background: jax.Array,
+    xys: jax.Array,
+    depths: jax.Array,
+    radii: jax.Array,
+    conics: jax.Array,
+    cum_tiles_hit: jax.Array,
+    n: int,
+    H: int,
+    W: int,
+    block_width: int,
+    tight: bool,
+    map_opacities: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
     # map_opacities: RAW opacity for the tight tile-count key emission (must match the
     # projection that produced cum_tiles_hit). Defaults to opacities -> byte-identical
     # to the plain path. In antialiased mode opacities is ρ-compensated (blend) while
@@ -2666,11 +3073,20 @@ def _rasterize_call(colors: jax.Array, opacities: jax.Array, background: jax.Arr
     if map_opacities is None:
         map_opacities = opacities
     out = _rasterize_ffi(
-        colors, opacities.reshape(n), map_opacities.reshape(n),
-        background.reshape(1, 3), xys, depths.reshape(n),
-        radii.reshape(n).astype(jnp.int32), conics,
+        colors,
+        opacities.reshape(n),
+        map_opacities.reshape(n),
+        background.reshape(1, 3),
+        xys,
+        depths.reshape(n),
+        radii.reshape(n).astype(jnp.int32),
+        conics,
         cum_tiles_hit.reshape(n).astype(jnp.int32),
-        int(n), int(H), int(W), int(block_width), int(tight),
+        int(n),
+        int(H),
+        int(W),
+        int(block_width),
+        int(tight),
         output_dims=(H, W),
     )
     # the FFI returns exactly (final_Ts, final_idx, out_img); typed as a Sequence.
@@ -2678,42 +3094,129 @@ def _rasterize_call(colors: jax.Array, opacities: jax.Array, background: jax.Arr
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13))
-def _rasterize_diff(colors: jax.Array, opacities: jax.Array, map_opacities: jax.Array,
-                    background: jax.Array, xys: jax.Array, depths: jax.Array,
-                    radii: jax.Array, conics: jax.Array, cum_tiles_hit: jax.Array,
-                    n: int, H: int, W: int, block_width: int, tight: bool
-                    ) -> jax.Array:
+def _rasterize_diff(
+    colors: jax.Array,
+    opacities: jax.Array,
+    map_opacities: jax.Array,
+    background: jax.Array,
+    xys: jax.Array,
+    depths: jax.Array,
+    radii: jax.Array,
+    conics: jax.Array,
+    cum_tiles_hit: jax.Array,
+    n: int,
+    H: int,
+    W: int,
+    block_width: int,
+    tight: bool,
+) -> jax.Array:
     _final_Ts, _final_idx, out_img = _rasterize_call(
-        colors, opacities, background, xys, depths, radii, conics, cum_tiles_hit,
-        n, H, W, block_width, tight, map_opacities)
+        colors,
+        opacities,
+        background,
+        xys,
+        depths,
+        radii,
+        conics,
+        cum_tiles_hit,
+        n,
+        H,
+        W,
+        block_width,
+        tight,
+        map_opacities,
+    )
     return out_img
 
 
-def _rasterize_diff_fwd(colors: jax.Array, opacities: jax.Array,
-                        map_opacities: jax.Array, background: jax.Array,
-                        xys: jax.Array, depths: jax.Array, radii: jax.Array,
-                        conics: jax.Array, cum_tiles_hit: jax.Array, n: int, H: int,
-                        W: int, block_width: int, tight: bool
-                        ) -> tuple[jax.Array, tuple[jax.Array, ...]]:
+def _rasterize_diff_fwd(
+    colors: jax.Array,
+    opacities: jax.Array,
+    map_opacities: jax.Array,
+    background: jax.Array,
+    xys: jax.Array,
+    depths: jax.Array,
+    radii: jax.Array,
+    conics: jax.Array,
+    cum_tiles_hit: jax.Array,
+    n: int,
+    H: int,
+    W: int,
+    block_width: int,
+    tight: bool,
+) -> tuple[jax.Array, tuple[jax.Array, ...]]:
     final_Ts, final_idx, out_img = _rasterize_call(
-        colors, opacities, background, xys, depths, radii, conics, cum_tiles_hit,
-        n, H, W, block_width, tight, map_opacities)
-    residuals = (colors, opacities, map_opacities, background, xys, depths,
-                 radii, conics, cum_tiles_hit, final_Ts, final_idx)
+        colors,
+        opacities,
+        background,
+        xys,
+        depths,
+        radii,
+        conics,
+        cum_tiles_hit,
+        n,
+        H,
+        W,
+        block_width,
+        tight,
+        map_opacities,
+    )
+    residuals = (
+        colors,
+        opacities,
+        map_opacities,
+        background,
+        xys,
+        depths,
+        radii,
+        conics,
+        cum_tiles_hit,
+        final_Ts,
+        final_idx,
+    )
     return out_img, residuals
 
 
-def _rasterize_diff_bwd(n: int, H: int, W: int, block_width: int, tight: bool,
-                        residuals: tuple[jax.Array, ...], v_img: jax.Array
-                        ) -> tuple[jax.Array | None, ...]:
-    (colors, opacities, map_opacities, background, xys, depths,
-     radii, conics, cum_tiles_hit, final_Ts, final_idx) = residuals
+def _rasterize_diff_bwd(
+    n: int,
+    H: int,
+    W: int,
+    block_width: int,
+    tight: bool,
+    residuals: tuple[jax.Array, ...],
+    v_img: jax.Array,
+) -> tuple[jax.Array | None, ...]:
+    (
+        colors,
+        opacities,
+        map_opacities,
+        background,
+        xys,
+        depths,
+        radii,
+        conics,
+        cum_tiles_hit,
+        final_Ts,
+        final_idx,
+    ) = residuals
     v_colors, v_opacity, v_xy, v_conic = _rasterize_bwd_ffi(
-        colors, opacities.reshape(n), map_opacities.reshape(n),
-        background.reshape(1, 3), xys, depths.reshape(n),
-        radii.reshape(n).astype(jnp.int32), conics,
-        cum_tiles_hit.reshape(n).astype(jnp.int32), final_Ts, final_idx, v_img,
-        int(n), int(H), int(W), int(block_width), int(tight),
+        colors,
+        opacities.reshape(n),
+        map_opacities.reshape(n),
+        background.reshape(1, 3),
+        xys,
+        depths.reshape(n),
+        radii.reshape(n).astype(jnp.int32),
+        conics,
+        cum_tiles_hit.reshape(n).astype(jnp.int32),
+        final_Ts,
+        final_idx,
+        v_img,
+        int(n),
+        int(H),
+        int(W),
+        int(block_width),
+        int(tight),
         output_dims=n,
     )
     v_opacity = v_opacity.reshape(opacities.shape)
@@ -2772,27 +3275,58 @@ def rasterize(
     if map_opacities is None:
         map_opacities = opacities
     return _rasterize_diff(
-        colors, opacities, map_opacities, background, xys, depths, radii, conics,
-        cum_tiles_hit, int(n), int(H), int(W), int(block_width), bool(tight))
+        colors,
+        opacities,
+        map_opacities,
+        background,
+        xys,
+        depths,
+        radii,
+        conics,
+        cum_tiles_hit,
+        int(n),
+        int(H),
+        int(W),
+        int(block_width),
+        bool(tight),
+    )
 
 
 # --- Depth-augmented differentiable rasterize (survey T2) ----------------------
 # Same as _rasterize_call but returns (image, expected_depth) from the depth FFI.
-def _rasterize_depth_call(colors: jax.Array, opacities: jax.Array,
-                          background: jax.Array, xys: jax.Array, depths: jax.Array,
-                          radii: jax.Array, conics: jax.Array,
-                          cum_tiles_hit: jax.Array, n: int, H: int, W: int,
-                          block_width: int, tight: bool,
-                          map_opacities: jax.Array | None = None
-                          ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+def _rasterize_depth_call(
+    colors: jax.Array,
+    opacities: jax.Array,
+    background: jax.Array,
+    xys: jax.Array,
+    depths: jax.Array,
+    radii: jax.Array,
+    conics: jax.Array,
+    cum_tiles_hit: jax.Array,
+    n: int,
+    H: int,
+    W: int,
+    block_width: int,
+    tight: bool,
+    map_opacities: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     if map_opacities is None:
         map_opacities = opacities
     out = _rasterize_depth_ffi(
-        colors, opacities.reshape(n), map_opacities.reshape(n),
-        background.reshape(1, 3), xys, depths.reshape(n),
-        radii.reshape(n).astype(jnp.int32), conics,
+        colors,
+        opacities.reshape(n),
+        map_opacities.reshape(n),
+        background.reshape(1, 3),
+        xys,
+        depths.reshape(n),
+        radii.reshape(n).astype(jnp.int32),
+        conics,
         cum_tiles_hit.reshape(n).astype(jnp.int32),
-        int(n), int(H), int(W), int(block_width), int(tight),
+        int(n),
+        int(H),
+        int(W),
+        int(block_width),
+        int(tight),
         output_dims=(H, W),
     )
     # the FFI returns exactly (final_Ts, final_idx, out_img, out_depth); typed as a Sequence.
@@ -2800,47 +3334,131 @@ def _rasterize_depth_call(colors: jax.Array, opacities: jax.Array,
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13))
-def _rasterize_depth_diff(colors: jax.Array, opacities: jax.Array,
-                          map_opacities: jax.Array, background: jax.Array,
-                          xys: jax.Array, depths: jax.Array, radii: jax.Array,
-                          conics: jax.Array, cum_tiles_hit: jax.Array, n: int, H: int,
-                          W: int, block_width: int, tight: bool
-                          ) -> tuple[jax.Array, jax.Array]:
+def _rasterize_depth_diff(
+    colors: jax.Array,
+    opacities: jax.Array,
+    map_opacities: jax.Array,
+    background: jax.Array,
+    xys: jax.Array,
+    depths: jax.Array,
+    radii: jax.Array,
+    conics: jax.Array,
+    cum_tiles_hit: jax.Array,
+    n: int,
+    H: int,
+    W: int,
+    block_width: int,
+    tight: bool,
+) -> tuple[jax.Array, jax.Array]:
     _final_Ts, _final_idx, out_img, out_depth = _rasterize_depth_call(
-        colors, opacities, background, xys, depths, radii, conics, cum_tiles_hit,
-        n, H, W, block_width, tight, map_opacities)
+        colors,
+        opacities,
+        background,
+        xys,
+        depths,
+        radii,
+        conics,
+        cum_tiles_hit,
+        n,
+        H,
+        W,
+        block_width,
+        tight,
+        map_opacities,
+    )
     return out_img, out_depth
 
 
-def _rasterize_depth_diff_fwd(colors: jax.Array, opacities: jax.Array,
-                              map_opacities: jax.Array, background: jax.Array,
-                              xys: jax.Array, depths: jax.Array, radii: jax.Array,
-                              conics: jax.Array, cum_tiles_hit: jax.Array, n: int,
-                              H: int, W: int, block_width: int, tight: bool
-                              ) -> tuple[tuple[jax.Array, jax.Array],
-                                         tuple[jax.Array, ...]]:
+def _rasterize_depth_diff_fwd(
+    colors: jax.Array,
+    opacities: jax.Array,
+    map_opacities: jax.Array,
+    background: jax.Array,
+    xys: jax.Array,
+    depths: jax.Array,
+    radii: jax.Array,
+    conics: jax.Array,
+    cum_tiles_hit: jax.Array,
+    n: int,
+    H: int,
+    W: int,
+    block_width: int,
+    tight: bool,
+) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, ...]]:
     final_Ts, final_idx, out_img, out_depth = _rasterize_depth_call(
-        colors, opacities, background, xys, depths, radii, conics, cum_tiles_hit,
-        n, H, W, block_width, tight, map_opacities)
-    residuals = (colors, opacities, map_opacities, background, xys, depths,
-                 radii, conics, cum_tiles_hit, final_Ts, final_idx)
+        colors,
+        opacities,
+        background,
+        xys,
+        depths,
+        radii,
+        conics,
+        cum_tiles_hit,
+        n,
+        H,
+        W,
+        block_width,
+        tight,
+        map_opacities,
+    )
+    residuals = (
+        colors,
+        opacities,
+        map_opacities,
+        background,
+        xys,
+        depths,
+        radii,
+        conics,
+        cum_tiles_hit,
+        final_Ts,
+        final_idx,
+    )
     return (out_img, out_depth), residuals
 
 
-def _rasterize_depth_diff_bwd(n: int, H: int, W: int, block_width: int, tight: bool,
-                              residuals: tuple[jax.Array, ...],
-                              cotangents: tuple[jax.Array, jax.Array]
-                              ) -> tuple[jax.Array | None, ...]:
-    (colors, opacities, map_opacities, background, xys, depths,
-     radii, conics, cum_tiles_hit, final_Ts, final_idx) = residuals
+def _rasterize_depth_diff_bwd(
+    n: int,
+    H: int,
+    W: int,
+    block_width: int,
+    tight: bool,
+    residuals: tuple[jax.Array, ...],
+    cotangents: tuple[jax.Array, jax.Array],
+) -> tuple[jax.Array | None, ...]:
+    (
+        colors,
+        opacities,
+        map_opacities,
+        background,
+        xys,
+        depths,
+        radii,
+        conics,
+        cum_tiles_hit,
+        final_Ts,
+        final_idx,
+    ) = residuals
     v_img, v_depth_img = cotangents
     v_colors, v_opacity, v_xy, v_conic, v_depths = _rasterize_bwd_depth_ffi(
-        colors, opacities.reshape(n), map_opacities.reshape(n),
-        background.reshape(1, 3), xys, depths.reshape(n),
-        radii.reshape(n).astype(jnp.int32), conics,
-        cum_tiles_hit.reshape(n).astype(jnp.int32), final_Ts, final_idx,
-        v_img, v_depth_img,
-        int(n), int(H), int(W), int(block_width), int(tight),
+        colors,
+        opacities.reshape(n),
+        map_opacities.reshape(n),
+        background.reshape(1, 3),
+        xys,
+        depths.reshape(n),
+        radii.reshape(n).astype(jnp.int32),
+        conics,
+        cum_tiles_hit.reshape(n).astype(jnp.int32),
+        final_Ts,
+        final_idx,
+        v_img,
+        v_depth_img,
+        int(n),
+        int(H),
+        int(W),
+        int(block_width),
+        int(tight),
         output_dims=n,
     )
     v_opacity = v_opacity.reshape(opacities.shape)
@@ -2886,5 +3504,18 @@ def rasterize_depth(
     if map_opacities is None:
         map_opacities = opacities
     return _rasterize_depth_diff(
-        colors, opacities, map_opacities, background, xys, depths, radii, conics,
-        cum_tiles_hit, int(n), int(H), int(W), int(block_width), bool(tight))
+        colors,
+        opacities,
+        map_opacities,
+        background,
+        xys,
+        depths,
+        radii,
+        conics,
+        cum_tiles_hit,
+        int(n),
+        int(H),
+        int(W),
+        int(block_width),
+        bool(tight),
+    )

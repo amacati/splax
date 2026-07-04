@@ -66,8 +66,19 @@ def render(
     # per-axis radii + an AccuTile ellipse-walk tile count (has_opac=1).
     opac = opacities.reshape(n)
     xys, depths, radii, conics, _num_tiles_hit, cum_tiles_hit = _project_call(
-        means3d, scales, quats, viewmat, opac,
-        n, 1, img_shape, f, c, float(glob_scale), float(clip_thresh), int(block_size),
+        means3d,
+        scales,
+        quats,
+        viewmat,
+        opac,
+        n,
+        1,
+        img_shape,
+        f,
+        c,
+        float(glob_scale),
+        float(clip_thresh),
+        int(block_size),
     )
 
     # _rasterize_call returns (final_Ts, final_idx, out_img); keep only the image.
@@ -85,13 +96,37 @@ def render(
     # blend. The training/differentiable path never takes this route.
     if _R._TILE_SPLIT:
         out_img = _rasterize_split_call(
-            colors, blend_opac, background, xys, depths, radii, conics,
-            cum_tiles_hit, n, H, W, int(block_size), True, map_opac,
+            colors,
+            blend_opac,
+            background,
+            xys,
+            depths,
+            radii,
+            conics,
+            cum_tiles_hit,
+            n,
+            H,
+            W,
+            int(block_size),
+            True,
+            map_opac,
         )
         return out_img
     _final_Ts, _final_idx, out_img = _rasterize_call(
-        colors, blend_opac, background, xys, depths, radii, conics,
-        cum_tiles_hit, n, H, W, int(block_size), True, map_opac,
+        colors,
+        blend_opac,
+        background,
+        xys,
+        depths,
+        radii,
+        conics,
+        cum_tiles_hit,
+        n,
+        H,
+        W,
+        int(block_size),
+        True,
+        map_opac,
     )
     return out_img
 

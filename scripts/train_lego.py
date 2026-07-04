@@ -55,7 +55,10 @@ def nerf_camera(frame: dict) -> np.ndarray:
 
 def load_view(frame: dict, res: int) -> tuple[jax.Array, jax.Array]:
     """Load a frame's image (composited on white) at `res`x`res` and its viewmat."""
-    img = iio.imread(LEGO / (frame["file_path"].lstrip("./") + ".png")).astype(np.float32) / 255.0
+    img = (
+        iio.imread(LEGO / (frame["file_path"].lstrip("./") + ".png")).astype(np.float32)
+        / 255.0
+    )
     img = img[..., :3] * img[..., 3:] + (1.0 - img[..., 3:])  # composite on white
     H = img.shape[0]
     if H != res:
@@ -70,12 +73,21 @@ def load_view_alpha(frame: dict, res: int) -> tuple[jax.Array, jax.Array, jax.Ar
     Used only by the ``--random-bkgd`` path: keeps the straight-alpha PNG channels
     apart so the caller can composite over a different background color each step.
     """
-    img = iio.imread(LEGO / (frame["file_path"].lstrip("./") + ".png")).astype(np.float32) / 255.0
+    img = (
+        iio.imread(LEGO / (frame["file_path"].lstrip("./") + ".png")).astype(np.float32)
+        / 255.0
+    )
     H = img.shape[0]
     if H != res:
         f = H // res
-        img = img.reshape(res, f, res, f, 4).mean((1, 3))  # box downsample (rgba jointly)
-    return jnp.asarray(img[..., :3]), jnp.asarray(img[..., 3:]), jnp.asarray(nerf_camera(frame))
+        img = img.reshape(res, f, res, f, 4).mean(
+            (1, 3)
+        )  # box downsample (rgba jointly)
+    return (
+        jnp.asarray(img[..., :3]),
+        jnp.asarray(img[..., 3:]),
+        jnp.asarray(nerf_camera(frame)),
+    )
 
 
 def init_params(n: int, seed: int = 0) -> dict[str, jax.Array]:
@@ -90,7 +102,9 @@ def init_params(n: int, seed: int = 0) -> dict[str, jax.Array]:
     }
 
 
-def init_params_mcmc(n: int, init_scale: float, init_opa: float, seed: int = 0) -> dict[str, jax.Array]:
+def init_params_mcmc(
+    n: int, init_scale: float, init_opa: float, seed: int = 0
+) -> dict[str, jax.Array]:
     """gsplat MCMC-preset init: half-opacity, uniform in the cube, ~knn scale."""
     k = jax.random.split(jax.random.key(seed), 5)
     return {
@@ -118,10 +132,19 @@ def render_params(
     if background is None:
         background = jnp.ones(3)
     return splax.render(
-        means, scales, quats, colors, opac,
-        viewmat=viewmat, background=background,
-        img_shape=(res, res), f=(f, f), c=(res // 2, res // 2),
-        glob_scale=1.0, clip_thresh=0.01, antialiased=antialiased,
+        means,
+        scales,
+        quats,
+        colors,
+        opac,
+        viewmat=viewmat,
+        background=background,
+        img_shape=(res, res),
+        f=(f, f),
+        c=(res // 2, res // 2),
+        glob_scale=1.0,
+        clip_thresh=0.01,
+        antialiased=antialiased,
     )[0]
 
 
@@ -132,7 +155,9 @@ def psnr(a: np.ndarray | jax.Array, b: np.ndarray | jax.Array) -> float:
 
 def save_ply(path: str | Path, params: dict[str, jax.Array]) -> None:
     scales = jnp.exp(params["log_scales"])
-    quats = params["quats"] / (jnp.linalg.norm(params["quats"], axis=-1, keepdims=True) + 1e-8)
+    quats = params["quats"] / (
+        jnp.linalg.norm(params["quats"], axis=-1, keepdims=True) + 1e-8
+    )
     colors = jax.nn.sigmoid(params["colors_logit"])
     opac = jax.nn.sigmoid(params["opac_logit"])
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -158,10 +183,16 @@ def run_smoke(args: argparse.Namespace) -> None:
     params = init_params(args.n, args.seed)
 
     # per-parameter Adam (real 3DGS uses distinct LRs; scaled up for a short run).
-    lrs = {"means": 2e-3, "log_scales": 5e-3, "quats": 1e-3,
-           "colors_logit": 1e-2, "opac_logit": 3e-2}
-    opt = optax.multi_transform({k: optax.adam(v) for k, v in lrs.items()},
-                                {k: k for k in params})
+    lrs = {
+        "means": 2e-3,
+        "log_scales": 5e-3,
+        "quats": 1e-3,
+        "colors_logit": 1e-2,
+        "opac_logit": 3e-2,
+    }
+    opt = optax.multi_transform(
+        {k: optax.adam(v) for k, v in lrs.items()}, {k: k for k in params}
+    )
     opt_state = opt.init(params)
 
     def loss_fn(p: dict[str, jax.Array], gt: jax.Array, vm: jax.Array) -> jax.Array:
@@ -175,10 +206,16 @@ def run_smoke(args: argparse.Namespace) -> None:
         loss, grads = jax.value_and_grad(loss_fn)(p, gt, vm)
         updates, opt_state = opt.update(grads, opt_state, p)
         # apply_updates is typed as the broad optax ArrayTree; the params stay a dict.
-        return cast(dict[str, jax.Array], optax.apply_updates(p, updates)), opt_state, loss
+        return (
+            cast(dict[str, jax.Array], optax.apply_updates(p, updates)),
+            opt_state,
+            loss,
+        )
 
     aa = args.antialiased
-    before = np.clip(np.asarray(render_params(params, test_vm, res, f, antialiased=aa)), 0, 1)
+    before = np.clip(
+        np.asarray(render_params(params, test_vm, res, f, antialiased=aa)), 0, 1
+    )
     p0 = psnr(before, test_img)
     print(f"random-init test PSNR: {p0:.2f} dB")
 
@@ -192,25 +229,43 @@ def run_smoke(args: argparse.Namespace) -> None:
         if it % 100 == 0 or it == args.steps:
             loss.block_until_ready()
             tp = psnr(render_params(params, test_vm, res, f, antialiased=aa), test_img)
-            traj.append({"step": it, "test_psnr": round(tp, 3), "train_l1": round(float(loss), 5)})
+            traj.append(
+                {
+                    "step": it,
+                    "test_psnr": round(tp, 3),
+                    "train_l1": round(float(loss), 5),
+                }
+            )
             print(f"step {it:5d}  train L1 {float(loss):.4f}  test PSNR {tp:5.2f} dB")
     wall = time.perf_counter() - t0
 
-    after = np.clip(np.asarray(render_params(params, test_vm, res, f, antialiased=aa)), 0, 1)
+    after = np.clip(
+        np.asarray(render_params(params, test_vm, res, f, antialiased=aa)), 0, 1
+    )
     p_final = psnr(after, test_img)
-    print(f"\nfinal test PSNR: {p_final:.2f} dB  ({args.steps} steps in {wall:.1f}s, "
-          f"{wall / args.steps * 1000:.1f} ms/step)")
+    print(
+        f"\nfinal test PSNR: {p_final:.2f} dB  ({args.steps} steps in {wall:.1f}s, "
+        f"{wall / args.steps * 1000:.1f} ms/step)"
+    )
 
     Path("results").mkdir(exist_ok=True)
     gt = np.asarray(test_img)
-    iio.imwrite("results/train_lego_before.png",
-                (np.concatenate([before, gt], 1) * 255).astype(np.uint8))
-    iio.imwrite("results/train_lego_after.png",
-                (np.concatenate([after, gt], 1) * 255).astype(np.uint8))
+    iio.imwrite(
+        "results/train_lego_before.png",
+        (np.concatenate([before, gt], 1) * 255).astype(np.uint8),
+    )
+    iio.imwrite(
+        "results/train_lego_after.png",
+        (np.concatenate([after, gt], 1) * 255).astype(np.uint8),
+    )
     out = {
-        "n": args.n, "res": res, "steps": args.steps,
-        "wall_s": round(wall, 2), "ms_per_step": round(wall / args.steps * 1000, 3),
-        "init_test_psnr": round(p0, 3), "final_test_psnr": round(p_final, 3),
+        "n": args.n,
+        "res": res,
+        "steps": args.steps,
+        "wall_s": round(wall, 2),
+        "ms_per_step": round(wall / args.steps * 1000, 3),
+        "init_test_psnr": round(p0, 3),
+        "final_test_psnr": round(p_final, 3),
         "trajectory": traj,
     }
     Path("results/phase6a_train_fit.json").write_text(json.dumps(out, indent=2))
@@ -243,7 +298,11 @@ def _make_step(
     """
 
     def loss_fn(
-        p: dict[str, jax.Array], gt_rgb: jax.Array, gt_alpha: jax.Array, bg: jax.Array, vm: jax.Array
+        p: dict[str, jax.Array],
+        gt_rgb: jax.Array,
+        gt_alpha: jax.Array,
+        bg: jax.Array,
+        vm: jax.Array,
     ) -> tuple[jax.Array, jax.Array]:
         img = render_params(p, vm, res, f, background=bg, antialiased=antialiased)
         gt = gt_alpha * gt_rgb + (1.0 - gt_alpha) * bg
@@ -264,15 +323,23 @@ def _make_step(
         bg: jax.Array,
         vm: jax.Array,
     ) -> tuple[dict[str, jax.Array], optax.OptState, jax.Array]:
-        (loss, l1), grads = jax.value_and_grad(loss_fn, has_aux=True)(p, gt_rgb, gt_alpha, bg, vm)
+        (loss, l1), grads = jax.value_and_grad(loss_fn, has_aux=True)(
+            p, gt_rgb, gt_alpha, bg, vm
+        )
         updates, opt_state = opt.update(grads, opt_state, p)
         # apply_updates is typed as the broad optax ArrayTree; the params stay a dict.
-        return cast(dict[str, jax.Array], optax.apply_updates(p, updates)), opt_state, l1
+        return (
+            cast(dict[str, jax.Array], optax.apply_updates(p, updates)),
+            opt_state,
+            l1,
+        )
 
     return step
 
 
-def _reset_opt_state(opt_state: optax.OptState, reset_mask: jax.Array) -> optax.OptState:
+def _reset_opt_state(
+    opt_state: optax.OptState, reset_mask: jax.Array
+) -> optax.OptState:
     """Zero Adam moments (leading-dim == N leaves) at relocated rows."""
     n = reset_mask.shape[0]
     keep = (~reset_mask).astype(jnp.float32)
@@ -292,7 +359,9 @@ def run_quality(args: argparse.Namespace) -> dict:
 
     # phase schedule: train at args.res, optionally fine-tune the tail at res_ft
     res_ft = args.res_ft or args.res
-    ft_start = int(args.steps * (1.0 - args.ft_frac)) if res_ft != args.res else args.steps
+    ft_start = (
+        int(args.steps * (1.0 - args.ft_frac)) if res_ft != args.res else args.steps
+    )
 
     def frames_at(res: int) -> tuple[jax.Array, jax.Array]:
         """imgs pre-composited on white, vms; used when --random-bkgd is off."""
@@ -301,11 +370,15 @@ def run_quality(args: argparse.Namespace) -> dict:
 
     def frames_at_alpha(res: int) -> tuple[jax.Array, jax.Array, jax.Array]:
         """raw (rgb, alpha) + vms; used to re-composite over a random bg each step."""
-        rgb, alpha, vms = zip(*[load_view_alpha(fr, res) for fr in train_meta["frames"]])
+        rgb, alpha, vms = zip(
+            *[load_view_alpha(fr, res) for fr in train_meta["frames"]]
+        )
         return jnp.stack(rgb), jnp.stack(alpha), jnp.stack(vms)
 
-    print(f"loading {len(train_meta['frames'])} train views "
-          f"(random_bkgd={args.random_bkgd}) ...")
+    print(
+        f"loading {len(train_meta['frames'])} train views "
+        f"(random_bkgd={args.random_bkgd}) ..."
+    )
     if args.random_bkgd:
         train = {args.res: frames_at_alpha(args.res)}
         if res_ft != args.res:
@@ -329,8 +402,15 @@ def run_quality(args: argparse.Namespace) -> dict:
     f_eval = 0.5 * eval_res / np.tan(0.5 * cax)
 
     def eval_psnr() -> tuple[float, list[float]]:
-        ps = [psnr(render_params(params, vm, eval_res, f_eval, antialiased=args.antialiased), gt)
-              for gt, vm in zip(eval_imgs, eval_vms)]
+        ps = [
+            psnr(
+                render_params(
+                    params, vm, eval_res, f_eval, antialiased=args.antialiased
+                ),
+                gt,
+            )
+            for gt, vm in zip(eval_imgs, eval_vms)
+        ]
         return float(np.mean(ps)), ps
 
     params = init_params_mcmc(args.n, args.init_scale, args.init_opa, args.seed)
@@ -354,21 +434,39 @@ def run_quality(args: argparse.Namespace) -> dict:
         p: dict[str, jax.Array], opt_state: optax.OptState, key: jax.Array
     ) -> tuple[dict[str, jax.Array], optax.OptState]:
         new, reset = splax.mcmc.relocate(
-            key, p["means"], p["log_scales"], p["quats"], p["colors_logit"],
-            p["opac_logit"], binoms, min_opacity=args.min_opacity)
+            key,
+            p["means"],
+            p["log_scales"],
+            p["quats"],
+            p["colors_logit"],
+            p["opac_logit"],
+            binoms,
+            min_opacity=args.min_opacity,
+        )
         return new, _reset_opt_state(opt_state, reset)
 
     @jax.jit
-    def add_noise(p: dict[str, jax.Array], key: jax.Array, scaler: float) -> dict[str, jax.Array]:
+    def add_noise(
+        p: dict[str, jax.Array], key: jax.Array, scaler: float
+    ) -> dict[str, jax.Array]:
         m = splax.mcmc.inject_noise(
-            key, p["means"], p["log_scales"], p["quats"], p["opac_logit"], scaler)
+            key, p["means"], p["log_scales"], p["quats"], p["opac_logit"], scaler
+        )
         return {**p, "means": m}
 
     # build steppers for each resolution phase
-    steppers = {r: _make_step(opt, r, 0.5 * r / np.tan(0.5 * cax),
-                              args.ssim_lambda, args.opacity_reg, args.scale_reg,
-                              antialiased=args.antialiased)
-                for r in train}
+    steppers = {
+        r: _make_step(
+            opt,
+            r,
+            0.5 * r / np.tan(0.5 * cax),
+            args.ssim_lambda,
+            args.opacity_reg,
+            args.scale_reg,
+            antialiased=args.antialiased,
+        )
+        for r in train
+    }
 
     p0, _ = eval_psnr()
     print(f"random-init eval PSNR (800x800): {p0:.2f} dB")
@@ -390,18 +488,26 @@ def run_quality(args: argparse.Namespace) -> dict:
         else:
             bg = white
             alpha = gt_alpha  # single (res,res,1) ones template, shared across views
-        params, opt_state, l1 = steppers[res](params, opt_state, imgs[vi], alpha, bg, vms[vi])
+        params, opt_state, l1 = steppers[res](
+            params, opt_state, imgs[vi], alpha, bg, vms[vi]
+        )
 
         # MCMC relocation (every refine_every steps, in a refine window)
-        if (args.relocate_every and args.refine_start < it < args.refine_stop
-                and it % args.relocate_every == 0):
+        if (
+            args.relocate_every
+            and args.refine_start < it < args.refine_stop
+            and it % args.relocate_every == 0
+        ):
             key, sk = jax.random.split(key)
             params, opt_state = relocate(params, opt_state, sk)
 
         # MCMC noise injection every step, annealed by the means LR; stops for good
         # after args.noise_stop_iter (gsplat's `noise_injection_stop_iter`, -1=never).
-        if (args.noise_lr > 0 and it < args.steps
-                and (args.noise_stop_iter < 0 or it < args.noise_stop_iter)):
+        if (
+            args.noise_lr > 0
+            and it < args.steps
+            and (args.noise_stop_iter < 0 or it < args.noise_stop_iter)
+        ):
             scaler = float(jnp.asarray(means_sched(it))) * args.noise_lr
             key, sk = jax.random.split(key)
             params = add_noise(params, sk, scaler)
@@ -409,39 +515,97 @@ def run_quality(args: argparse.Namespace) -> dict:
         if it % args.eval_every == 0 or it == args.steps:
             l1.block_until_ready()
             ep, _ = eval_psnr()
-            curve.append({"step": it, "eval_psnr": round(ep, 3),
-                          "train_l1": round(float(l1), 5), "res": res})
-            print(f"step {it:5d}  res {res}  train L1 {float(l1):.4f}  eval PSNR {ep:5.2f} dB")
+            curve.append(
+                {
+                    "step": it,
+                    "eval_psnr": round(ep, 3),
+                    "train_l1": round(float(l1), 5),
+                    "res": res,
+                }
+            )
+            print(
+                f"step {it:5d}  res {res}  train L1 {float(l1):.4f}  eval PSNR {ep:5.2f} dB"
+            )
     wall = time.perf_counter() - t0
 
     ep_final, per_frame = eval_psnr()
-    print(f"\nfinal eval PSNR (800x800, frames {args.eval_frames}): {ep_final:.2f} dB "
-          f"{[round(x, 2) for x in per_frame]}")
-    print(f"{args.steps} steps / {args.n} gaussians in {wall:.1f}s "
-          f"({wall / args.steps * 1000:.1f} ms/step)")
+    print(
+        f"\nfinal eval PSNR (800x800, frames {args.eval_frames}): {ep_final:.2f} dB "
+        f"{[round(x, 2) for x in per_frame]}"
+    )
+    print(
+        f"{args.steps} steps / {args.n} gaussians in {wall:.1f}s "
+        f"({wall / args.steps * 1000:.1f} ms/step)"
+    )
 
     Path("results").mkdir(exist_ok=True)
     # side-by-side render|GT for each eval frame at 800x800
     for fi, (gt, vm) in zip(args.eval_frames, zip(eval_imgs, eval_vms)):
-        r = np.clip(np.asarray(render_params(params, vm, eval_res, f_eval, antialiased=args.antialiased)), 0, 1)
-        iio.imwrite(f"results/lego_fit_6d_f{fi}.png",
-                    (np.concatenate([r, gt], 1) * 255).astype(np.uint8))
+        r = np.clip(
+            np.asarray(
+                render_params(
+                    params, vm, eval_res, f_eval, antialiased=args.antialiased
+                )
+            ),
+            0,
+            1,
+        )
+        iio.imwrite(
+            f"results/lego_fit_6d_f{fi}.png",
+            (np.concatenate([r, gt], 1) * 255).astype(np.uint8),
+        )
     # keep the smoke output names populated too (frame 0)
-    r0 = np.clip(np.asarray(render_params(params, eval_vms[0], eval_res, f_eval, antialiased=args.antialiased)), 0, 1)
-    iio.imwrite("results/train_lego_after.png",
-                (np.concatenate([r0, eval_imgs[0]], 1) * 255).astype(np.uint8))
+    r0 = np.clip(
+        np.asarray(
+            render_params(
+                params, eval_vms[0], eval_res, f_eval, antialiased=args.antialiased
+            )
+        ),
+        0,
+        1,
+    )
+    iio.imwrite(
+        "results/train_lego_after.png",
+        (np.concatenate([r0, eval_imgs[0]], 1) * 255).astype(np.uint8),
+    )
 
     out = {
-        "mode": "quality", "n": args.n, "steps": args.steps,
-        "res": args.res, "res_ft": res_ft, "ft_start": ft_start, "eval_res": eval_res,
-        "wall_s": round(wall, 2), "ms_per_step": round(wall / args.steps * 1000, 3),
-        "init_eval_psnr": round(p0, 3), "final_eval_psnr": round(ep_final, 3),
-        "per_frame_psnr": {fi: round(x, 3) for fi, x in zip(args.eval_frames, per_frame)},
-        "hparams": {k: getattr(args, k) for k in (
-            "means_lr", "scales_lr", "quats_lr", "colors_lr", "opac_lr",
-            "ssim_lambda", "opacity_reg", "scale_reg", "noise_lr", "min_opacity",
-            "relocate_every", "refine_start", "refine_stop", "init_scale", "init_opa",
-            "random_bkgd", "noise_stop_iter")},
+        "mode": "quality",
+        "n": args.n,
+        "steps": args.steps,
+        "res": args.res,
+        "res_ft": res_ft,
+        "ft_start": ft_start,
+        "eval_res": eval_res,
+        "wall_s": round(wall, 2),
+        "ms_per_step": round(wall / args.steps * 1000, 3),
+        "init_eval_psnr": round(p0, 3),
+        "final_eval_psnr": round(ep_final, 3),
+        "per_frame_psnr": {
+            fi: round(x, 3) for fi, x in zip(args.eval_frames, per_frame)
+        },
+        "hparams": {
+            k: getattr(args, k)
+            for k in (
+                "means_lr",
+                "scales_lr",
+                "quats_lr",
+                "colors_lr",
+                "opac_lr",
+                "ssim_lambda",
+                "opacity_reg",
+                "scale_reg",
+                "noise_lr",
+                "min_opacity",
+                "relocate_every",
+                "refine_start",
+                "refine_stop",
+                "init_scale",
+                "init_opa",
+                "random_bkgd",
+                "noise_stop_iter",
+            )
+        },
         "curve": curve,
     }
     Path("results/phase6d_train_fit.json").write_text(json.dumps(out, indent=2))
@@ -455,7 +619,9 @@ def run_quality(args: argparse.Namespace) -> dict:
     return out
 
 
-def _plot_curve(curve: list[dict], ft_start: int | None, wall: float, final: float) -> None:
+def _plot_curve(
+    curve: list[dict], ft_start: int | None, wall: float, final: float
+) -> None:
     steps = [c["step"] for c in curve]
     ps = [c["eval_psnr"] for c in curve]
     fig, ax = plt.subplots(figsize=(6, 4))
@@ -476,17 +642,28 @@ def _plot_curve(curve: list[dict], ft_start: int | None, wall: float, final: flo
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--quality", action="store_true", help="run the Phase 6d MCMC recipe")
+    ap.add_argument(
+        "--quality", action="store_true", help="run the Phase 6d MCMC recipe"
+    )
     ap.add_argument("--n", type=int, default=None)
     ap.add_argument("--res", type=int, default=400)
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--antialiased", action="store_true",
-                     help="Mip-Splatting opacity compensation (gsplat rasterize_mode=antialiased)")
-    ap.add_argument("--out-ply", help="optional path to save the fitted splats as a 3DGS .ply")
+    ap.add_argument(
+        "--antialiased",
+        action="store_true",
+        help="Mip-Splatting opacity compensation (gsplat rasterize_mode=antialiased)",
+    )
+    ap.add_argument(
+        "--out-ply", help="optional path to save the fitted splats as a 3DGS .ply"
+    )
     # quality-only knobs (gsplat-derived defaults)
-    ap.add_argument("--res-ft", type=int, default=800, help="fine-tune resolution (tail)")
-    ap.add_argument("--ft-frac", type=float, default=0.25, help="fraction of steps at res-ft")
+    ap.add_argument(
+        "--res-ft", type=int, default=800, help="fine-tune resolution (tail)"
+    )
+    ap.add_argument(
+        "--ft-frac", type=float, default=0.25, help="fraction of steps at res-ft"
+    )
     ap.add_argument("--eval-res", type=int, default=800)
     ap.add_argument("--eval-frames", type=int, nargs="+", default=[0, 25, 50])
     ap.add_argument("--eval-every", type=int, default=200)
@@ -499,16 +676,23 @@ def main() -> None:
     ap.add_argument("--opacity-reg", type=float, default=0.01)
     ap.add_argument("--scale-reg", type=float, default=0.01)
     ap.add_argument("--noise-lr", type=float, default=5e5)
-    ap.add_argument("--noise-stop-iter", type=int, default=-1,
-                     help="stop MCMC noise injection after this step (-1=never, gsplat default)")
+    ap.add_argument(
+        "--noise-stop-iter",
+        type=int,
+        default=-1,
+        help="stop MCMC noise injection after this step (-1=never, gsplat default)",
+    )
     ap.add_argument("--min-opacity", type=float, default=0.005)
     ap.add_argument("--relocate-every", type=int, default=100)
     ap.add_argument("--refine-start", type=int, default=200)
     ap.add_argument("--refine-stop", type=int, default=None, help="default: 0.9*steps")
     ap.add_argument("--init-scale", type=float, default=0.05)
     ap.add_argument("--init-opa", type=float, default=0.2)
-    ap.add_argument("--random-bkgd", action="store_true",
-                     help="composite render+GT over a random bg color each step (gsplat random_bkgd)")
+    ap.add_argument(
+        "--random-bkgd",
+        action="store_true",
+        help="composite render+GT over a random bg color each step (gsplat random_bkgd)",
+    )
     ap.add_argument("--no-plot", dest="plot", action="store_false")
     args = ap.parse_args()
 

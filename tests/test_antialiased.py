@@ -107,11 +107,25 @@ def test_antialiased_off_matches_plain() -> None:
     pk = _pk(H, W)
 
     off, _ = splax.training.render(
-        means, scales, quats, colors, opac, viewmat=vm, background=bg,
-        antialiased=False, **pk,
+        means,
+        scales,
+        quats,
+        colors,
+        opac,
+        viewmat=vm,
+        background=bg,
+        antialiased=False,
+        **pk,
     )
     inf = splax.inference.render(
-        means, scales, quats, colors, opac, viewmat=vm, background=bg, **pk,
+        means,
+        scales,
+        quats,
+        colors,
+        opac,
+        viewmat=vm,
+        background=bg,
+        **pk,
     )
     assert np.array_equal(np.asarray(off), np.asarray(inf)), (
         "antialiased=False must be byte-identical to the plain inference forward"
@@ -126,11 +140,21 @@ def test_antialiased_off_matches_plain() -> None:
         def f(o: jax.Array) -> jax.Array:
             return jnp.mean(
                 splax.rasterize(
-                    colors, o, bg, xys, depths, radii, conics, cum,
-                    img_shape=(H, W), block_width=16, tight=True,
+                    colors,
+                    o,
+                    bg,
+                    xys,
+                    depths,
+                    radii,
+                    conics,
+                    cum,
+                    img_shape=(H, W),
+                    block_width=16,
+                    tight=True,
                     map_opacities=map_opac,
                 )
             )
+
         return f
 
     g_none = np.asarray(jax.grad(rast(None))(opac))
@@ -145,12 +169,32 @@ def test_antialiased_changes_output() -> None:
     n, H, W = 2500, 110, 110
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=3)
     pk = _pk(H, W)
-    off = np.asarray(splax.render(
-        means, scales, quats, colors, opac, viewmat=vm, background=bg,
-        antialiased=False, **pk)[0])
-    on = np.asarray(splax.render(
-        means, scales, quats, colors, opac, viewmat=vm, background=bg,
-        antialiased=True, **pk)[0])
+    off = np.asarray(
+        splax.render(
+            means,
+            scales,
+            quats,
+            colors,
+            opac,
+            viewmat=vm,
+            background=bg,
+            antialiased=False,
+            **pk,
+        )[0]
+    )
+    on = np.asarray(
+        splax.render(
+            means,
+            scales,
+            quats,
+            colors,
+            opac,
+            viewmat=vm,
+            background=bg,
+            antialiased=True,
+            **pk,
+        )[0]
+    )
     assert np.abs(on - off).max() > 1e-3, "antialiased render must differ from plain"
 
 
@@ -164,7 +208,9 @@ def test_antialiased_finite_difference() -> None:
     w = jax.random.uniform(jax.random.key(5), (H, W, 3))
     pk = _pk(H, W)
 
-    def loss(m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array) -> jax.Array:
+    def loss(
+        m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array
+    ) -> jax.Array:
         img, _ = splax.render(
             m, s, q, c, o, viewmat=vm, background=bg, antialiased=True, **pk
         )

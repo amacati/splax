@@ -43,6 +43,7 @@ def lookat_viewmats(center: np.ndarray, radius: float, num_views: int) -> jax.Ar
         mats.append(m)
     return jnp.asarray(np.stack(mats), jnp.float32)
 
+
 LEGO_PLY = Path("data/scenes/lego.ply")
 
 
@@ -67,9 +68,16 @@ def _render(
 ) -> jax.Array:
     means, scales, quats, colors, opac = splats
     return splax.inference.render(
-        means, scales, quats, colors, opac,
-        viewmat=viewmat, img_shape=(H, W),
-        f=(float(H), float(H)), c=(W // 2, H // 2), **RENDER_KW,
+        means,
+        scales,
+        quats,
+        colors,
+        opac,
+        viewmat=viewmat,
+        img_shape=(H, W),
+        f=(float(H), float(H)),
+        c=(W // 2, H // 2),
+        **RENDER_KW,
     )
 
 
@@ -112,8 +120,9 @@ def test_ply_render_roundtrip(tmp_path: Path) -> None:
     splats2 = load_ply(copy)
 
     center = np.asarray(splats[0].mean(axis=0))
-    radius = float(np.percentile(
-        np.linalg.norm(np.asarray(splats[0]) - center, axis=-1), 90))
+    radius = float(
+        np.percentile(np.linalg.norm(np.asarray(splats[0]) - center, axis=-1), 90)
+    )
     viewmat = lookat_viewmats(center, radius, 1)[0]
 
     H = W = 200
@@ -130,18 +139,35 @@ def test_inference_equals_training_forward() -> None:
     """The Phase 6c split is numerically zero-cost: identical forward image."""
     splats = load_ply(LEGO_PLY)
     center = np.asarray(splats[0].mean(axis=0))
-    radius = float(np.percentile(
-        np.linalg.norm(np.asarray(splats[0]) - center, axis=-1), 90))
+    radius = float(
+        np.percentile(np.linalg.norm(np.asarray(splats[0]) - center, axis=-1), 90)
+    )
     viewmat = lookat_viewmats(center, radius, 1)[0]
     means, scales, quats, colors, opac = splats
 
     H = W = 200
     inf_img = splax.inference.render(
-        means, scales, quats, colors, opac,
-        viewmat=viewmat, img_shape=(H, W),
-        f=(float(H), float(H)), c=(W // 2, H // 2), **RENDER_KW)
+        means,
+        scales,
+        quats,
+        colors,
+        opac,
+        viewmat=viewmat,
+        img_shape=(H, W),
+        f=(float(H), float(H)),
+        c=(W // 2, H // 2),
+        **RENDER_KW,
+    )
     train_img, _ = splax.training.render(
-        means, scales, quats, colors, opac,
-        viewmat=viewmat, img_shape=(H, W),
-        f=(float(H), float(H)), c=(W // 2, H // 2), **RENDER_KW)
+        means,
+        scales,
+        quats,
+        colors,
+        opac,
+        viewmat=viewmat,
+        img_shape=(H, W),
+        f=(float(H), float(H)),
+        c=(W // 2, H // 2),
+        **RENDER_KW,
+    )
     np.testing.assert_array_equal(np.asarray(inf_img), np.asarray(train_img))

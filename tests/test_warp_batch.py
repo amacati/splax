@@ -87,8 +87,12 @@ KW: _KW = {
     "clip_thresh": 0.01,
 }
 PROJ_KW: _ProjKW = {
-    "img_shape": (H, W), "f": (float(H), float(H)), "c": (W // 2, H // 2),
-    "glob_scale": 1.0, "clip_thresh": 0.01, "block_width": 16,
+    "img_shape": (H, W),
+    "f": (float(H), float(H)),
+    "c": (W // 2, H // 2),
+    "glob_scale": 1.0,
+    "clip_thresh": 0.01,
+    "block_width": 16,
 }
 VIEWS = jnp.stack([_viewmat(0.0), _viewmat(0.3), _viewmat(-0.2)])  # B=3
 
@@ -109,8 +113,10 @@ def test_project_vmap_over_viewmats() -> None:
     global cumsum of the flattened num_tiles_hit rather than the per-image cumsum.
     """
     m, s, q, _c, _o = _rand_scene(N, seed=1)
+
     def f(vm: jax.Array) -> tuple:
         return splax.project(m, s, q, vm, **PROJ_KW)
+
     B = VIEWS.shape[0]
     batched = jax.vmap(f)(VIEWS)
     # outputs 0..4 = xys, depths, radii, conics, num_tiles_hit -> bit-exact per image
@@ -175,13 +181,18 @@ def test_render_vmap_larger_batch_and_res() -> None:
     m, s, q, c, o = _rand_scene(12_000, seed=11)
     B, hh, ww = 8, 512, 512
     kw: _KW = {
-        **KW, "img_shape": (hh, ww), "f": (float(hh), float(hh)), "c": (ww // 2, hh // 2)
+        **KW,
+        "img_shape": (hh, ww),
+        "f": (float(hh), float(hh)),
+        "c": (ww // 2, hh // 2),
     }
     views = jnp.stack([_viewmat(0.1 * i) for i in range(B)])
     ref = jnp.stack(
         [splax.render(m, s, q, c, o, viewmat=views[i], **kw)[0] for i in range(B)]
     )
-    out = jax.jit(jax.vmap(lambda vm: splax.render(m, s, q, c, o, viewmat=vm, **kw)[0]))(views)
+    out = jax.jit(
+        jax.vmap(lambda vm: splax.render(m, s, q, c, o, viewmat=vm, **kw)[0])
+    )(views)
     np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
 
 
@@ -194,7 +205,10 @@ def test_render_vmap_packed_matches_stack(monkeypatch: pytest.MonkeyPatch) -> No
     m, s, q, c, o = _rand_scene(12_000, seed=11)
     B, hh, ww = 8, 512, 512
     kw: _KW = {
-        **KW, "img_shape": (hh, ww), "f": (float(hh), float(hh)), "c": (ww // 2, hh // 2)
+        **KW,
+        "img_shape": (hh, ww),
+        "f": (float(hh), float(hh)),
+        "c": (ww // 2, hh // 2),
     }
     views = jnp.stack([_viewmat(0.1 * i) for i in range(B)])
     ref = jnp.stack(
@@ -202,7 +216,9 @@ def test_render_vmap_packed_matches_stack(monkeypatch: pytest.MonkeyPatch) -> No
     )  # B=1 renders each pack with depth_bits=21
     splax.clear_scratch()
     out = np.asarray(
-        jax.jit(jax.vmap(lambda vm: splax.render(m, s, q, c, o, viewmat=vm, **kw)[0]))(views)
+        jax.jit(jax.vmap(lambda vm: splax.render(m, s, q, c, o, viewmat=vm, **kw)[0]))(
+            views
+        )
     )  # B=8 render packs with depth_bits=18 (image 3 + tile 10)
     assert _rast._scratch_cache[str(wp.get_device("cuda:0"))]["isect_dtype"] == wp.int32
     d = np.abs(out - np.asarray(ref))

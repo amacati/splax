@@ -67,9 +67,16 @@ def compute_relocation(
     return new_opac, coeff[:, None] * scales
 
 
-def relocate(key: jax.Array, means: jax.Array, log_scales: jax.Array, quats: jax.Array,
-             colors_logit: jax.Array, opac_logit: jax.Array, binoms: jax.Array,
-             min_opacity: float = 0.005) -> tuple[dict[str, jax.Array], jax.Array]:
+def relocate(
+    key: jax.Array,
+    means: jax.Array,
+    log_scales: jax.Array,
+    quats: jax.Array,
+    colors_logit: jax.Array,
+    opac_logit: jax.Array,
+    binoms: jax.Array,
+    min_opacity: float = 0.005,
+) -> tuple[dict[str, jax.Array], jax.Array]:
     """Relocate dead gaussians onto alive ones (fixed ``N``); port of gsplat ``relocate``.
 
     Operates on the *raw* training parameters (opacity/scale stored as
@@ -96,7 +103,9 @@ def relocate(key: jax.Array, means: jax.Array, log_scales: jax.Array, quats: jax
     idx = jnp.arange(n)
     source = jnp.where(dead, src, idx)  # dead pull from src, others self
     ratio = jnp.where(dead, counts[src], counts[idx]) + 1.0
-    new_opac, new_scale = compute_relocation(opac[source], scales[source], ratio, binoms)
+    new_opac, new_scale = compute_relocation(
+        opac[source], scales[source], ratio, binoms
+    )
     new_opac = jnp.clip(new_opac, min_opacity, 1.0 - _EPS)
     new_opac_logit = jnp.log(new_opac / (1.0 - new_opac)).reshape(opac_logit.shape)
     new_log_scales = jnp.log(new_scale)
@@ -108,7 +117,9 @@ def relocate(key: jax.Array, means: jax.Array, log_scales: jax.Array, quats: jax
         "quats": jnp.where(m, quats[source], quats),
         "colors_logit": jnp.where(m, colors_logit[source], colors_logit),
         "log_scales": jnp.where(m, new_log_scales, log_scales),
-        "opac_logit": jnp.where(reset.reshape(opac_logit.shape), new_opac_logit, opac_logit),
+        "opac_logit": jnp.where(
+            reset.reshape(opac_logit.shape), new_opac_logit, opac_logit
+        ),
     }
     return out, reset
 
@@ -117,15 +128,30 @@ def _quat_to_rotmat(quats: jax.Array) -> jax.Array:
     """Normalized wxyz quaternions -> rotation matrices (N, 3, 3) (gsplat convention)."""
     q = quats / (jnp.linalg.norm(quats, axis=-1, keepdims=True) + _EPS)
     w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
-    return jnp.stack([
-        1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y),
-        2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
-        2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y),
-    ], axis=-1).reshape(-1, 3, 3)
+    return jnp.stack(
+        [
+            1 - 2 * (y * y + z * z),
+            2 * (x * y - w * z),
+            2 * (x * z + w * y),
+            2 * (x * y + w * z),
+            1 - 2 * (x * x + z * z),
+            2 * (y * z - w * x),
+            2 * (x * z - w * y),
+            2 * (y * z + w * x),
+            1 - 2 * (x * x + y * y),
+        ],
+        axis=-1,
+    ).reshape(-1, 3, 3)
 
 
-def inject_noise(key: jax.Array, means: jax.Array, log_scales: jax.Array,
-                 quats: jax.Array, opac_logit: jax.Array, scaler: float) -> jax.Array:
+def inject_noise(
+    key: jax.Array,
+    means: jax.Array,
+    log_scales: jax.Array,
+    quats: jax.Array,
+    opac_logit: jax.Array,
+    scaler: float,
+) -> jax.Array:
     """Add covariance/opacity-weighted Gaussian noise to ``means`` (gsplat ``inject_noise_to_position``).
 
     ``noise = Sigma @ (randn * op_sigmoid(1 - opacity) * scaler)`` with

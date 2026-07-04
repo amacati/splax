@@ -21,7 +21,8 @@ ROOT = Path(__file__).resolve().parent.parent
 def _load_module() -> types.ModuleType:
     sys.path.insert(0, str(ROOT / "scripts"))
     spec = importlib.util.spec_from_file_location(
-        "train_colmap", ROOT / "scripts" / "train_colmap.py")
+        "train_colmap", ROOT / "scripts" / "train_colmap.py"
+    )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -44,7 +45,7 @@ def test_padding_applies_density_ratio_correction() -> None:
     # the correction is applied to the whole knn-derived cloud; the first m rows are the
     # original points, so compare them against the uncorrected knn scales (cap=0.3 as in
     # init_from_points) minus the expected (1/3)ln(n/m) offset.
-    base = tc.knn_scales(xyz, cap=0.3)                       # (m,) uncorrected
+    base = tc.knn_scales(xyz, cap=0.3)  # (m,) uncorrected
     expected = (base - np.log(n / m) / 3.0)[:, None].repeat(3, 1)
     assert np.allclose(ls[:m], expected, atol=1e-5)
     # all three columns share the per-gaussian scale

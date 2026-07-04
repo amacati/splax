@@ -64,7 +64,11 @@ def test_lego_render_psnr_regression(frame_idx: int) -> None:
 
     ff = 0.5 * W / np.tan(0.5 * meta["camera_angle_x"])
     img = splax.inference.render(
-        means, scales, quats, colors, opac,
+        means,
+        scales,
+        quats,
+        colors,
+        opac,
         viewmat=jnp.asarray(_nerf_camera(frame)),
         background=jnp.ones(3),
         img_shape=(H, W),
@@ -77,4 +81,6 @@ def test_lego_render_psnr_regression(frame_idx: int) -> None:
     psnr = -10.0 * np.log10(float(np.mean((img - gt) ** 2)))
 
     floor = KNOWN_PSNR[frame_idx] - SLACK
-    assert psnr >= floor, f"frame {frame_idx} PSNR {psnr:.3f} dB below floor {floor:.3f}"
+    assert psnr >= floor, (
+        f"frame {frame_idx} PSNR {psnr:.3f} dB below floor {floor:.3f}"
+    )

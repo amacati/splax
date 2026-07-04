@@ -32,7 +32,9 @@ def _scene(
     # semi-transparent so heavy tiles do NOT saturate early -> segments do real work
     opac = jax.random.uniform(k[4], (n, 1), minval=0.02, maxval=0.6)
     bg = jax.random.uniform(k[5], (3,))
-    vm = jnp.array([[1, 0, 0, 0.0], [0, 1, 0, 0.0], [0, 0, 1, 5.0], [0, 0, 0, 1]], jnp.float32)
+    vm = jnp.array(
+        [[1, 0, 0, 0.0], [0, 1, 0, 0.0], [0, 0, 1, 5.0], [0, 0, 0, 1]], jnp.float32
+    )
     return means, scales, quats, colors, opac, bg, vm
 
 
@@ -48,9 +50,22 @@ def _render(
     if threshold is not None:
         monkeypatch.setattr(_R, "_SPLIT_THRESHOLD", threshold)
     m, s, q, c, o, bg, vm = scene
-    fn = jax.jit(lambda: inference.render(
-        m, s, q, c, o, viewmat=vm, background=bg, img_shape=(H, W),
-        f=(float(H), float(H)), c=(W // 2, H // 2), glob_scale=1.0, clip_thresh=0.01))
+    fn = jax.jit(
+        lambda: inference.render(
+            m,
+            s,
+            q,
+            c,
+            o,
+            viewmat=vm,
+            background=bg,
+            img_shape=(H, W),
+            f=(float(H), float(H)),
+            c=(W // 2, H // 2),
+            glob_scale=1.0,
+            clip_thresh=0.01,
+        )
+    )
     img = np.asarray(fn())
     jax.block_until_ready(img)
     return img
@@ -62,7 +77,9 @@ def _psnr(a: np.ndarray, b: np.ndarray) -> float:
 
 
 @pytest.mark.parametrize("concentrate", [False, True])
-def test_split_agrees_with_unsplit(monkeypatch: pytest.MonkeyPatch, concentrate: bool) -> None:
+def test_split_agrees_with_unsplit(
+    monkeypatch: pytest.MonkeyPatch, concentrate: bool
+) -> None:
     """Split blend must match the unsplit blend to > 80 dB (segment-boundary ULP)."""
     scene = _scene(400_000, concentrate=concentrate)
     ref = _render(scene, 256, 256, False, monkeypatch)
@@ -98,9 +115,20 @@ def test_split_batched_vmap(monkeypatch: pytest.MonkeyPatch) -> None:
     H = W = 256
 
     def one(v: jax.Array) -> jax.Array:
-        return inference.render(m, s, q, c, o, viewmat=v, background=bg, img_shape=(H, W),
-                                f=(float(H), float(H)), c=(W // 2, H // 2),
-                                glob_scale=1.0, clip_thresh=0.01)
+        return inference.render(
+            m,
+            s,
+            q,
+            c,
+            o,
+            viewmat=v,
+            background=bg,
+            img_shape=(H, W),
+            f=(float(H), float(H)),
+            c=(W // 2, H // 2),
+            glob_scale=1.0,
+            clip_thresh=0.01,
+        )
 
     batched = np.asarray(jax.jit(jax.vmap(one))(vms))
     assert batched.shape == (2, H, W, 3)

@@ -28,7 +28,9 @@ from plyfile import PlyData, PlyElement
 _C0 = 0.28209479177387814
 
 
-def load_ply(path: str | Path) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+def load_ply(
+    path: str | Path,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Read a 3DGS ``.ply`` into the five render-space arrays ``render`` consumes.
 
     Returns (means, scales, quats, colors, opacities) as float32 jax arrays,
@@ -86,17 +88,45 @@ def write_ply(
     opac = np.clip(opacities, 1e-7, 1.0 - 1e-7)
     opacity = np.log(opac / (1.0 - opac))
 
-    fields = ["x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2",
-              "opacity", "scale_0", "scale_1", "scale_2",
-              "rot_0", "rot_1", "rot_2", "rot_3"]
+    fields = [
+        "x",
+        "y",
+        "z",
+        "nx",
+        "ny",
+        "nz",
+        "f_dc_0",
+        "f_dc_1",
+        "f_dc_2",
+        "opacity",
+        "scale_0",
+        "scale_1",
+        "scale_2",
+        "rot_0",
+        "rot_1",
+        "rot_2",
+        "rot_3",
+    ]
     verts = np.empty(n, dtype=[(f, "f4") for f in fields])
     verts["x"], verts["y"], verts["z"] = means[:, 0], means[:, 1], means[:, 2]
     verts["nx"] = verts["ny"] = verts["nz"] = 0.0
-    verts["f_dc_0"], verts["f_dc_1"], verts["f_dc_2"] = f_dc[:, 0], f_dc[:, 1], f_dc[:, 2]
+    verts["f_dc_0"], verts["f_dc_1"], verts["f_dc_2"] = (
+        f_dc[:, 0],
+        f_dc[:, 1],
+        f_dc[:, 2],
+    )
     verts["opacity"] = opacity
-    verts["scale_0"], verts["scale_1"], verts["scale_2"] = log_scales[:, 0], log_scales[:, 1], log_scales[:, 2]
+    verts["scale_0"], verts["scale_1"], verts["scale_2"] = (
+        log_scales[:, 0],
+        log_scales[:, 1],
+        log_scales[:, 2],
+    )
     verts["rot_0"], verts["rot_1"], verts["rot_2"], verts["rot_3"] = (
-        quats[:, 0], quats[:, 1], quats[:, 2], quats[:, 3])
+        quats[:, 0],
+        quats[:, 1],
+        quats[:, 2],
+        quats[:, 3],
+    )
 
     el = PlyElement.describe(verts, "vertex")
     PlyData([el], text=False).write(str(path))

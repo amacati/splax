@@ -20,12 +20,15 @@ ROOT = Path(__file__).resolve().parent.parent
 SPARSE = ROOT / "data" / "drone" / "sparse" / "0"
 
 pytestmark = pytest.mark.skipif(
-    not SPARSE.exists(), reason="COLMAP drone dataset not present (data/ is gitignored)")
+    not SPARSE.exists(), reason="COLMAP drone dataset not present (data/ is gitignored)"
+)
 
 
 def _load_module() -> types.ModuleType:
     sys.path.insert(0, str(ROOT / "scripts"))
-    spec = importlib.util.spec_from_file_location("train_colmap", ROOT / "scripts" / "train_colmap.py")
+    spec = importlib.util.spec_from_file_location(
+        "train_colmap", ROOT / "scripts" / "train_colmap.py"
+    )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

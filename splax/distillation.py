@@ -80,7 +80,9 @@ def _opacity_bbox(
     return los, his
 
 
-def _lookat_viewmats(eyes: np.ndarray, targets: np.ndarray, up: tuple[float, float, float] | np.ndarray) -> np.ndarray:
+def _lookat_viewmats(
+    eyes: np.ndarray, targets: np.ndarray, up: tuple[float, float, float] | np.ndarray
+) -> np.ndarray:
     """Build (n,4,4) world-to-camera matrices (OpenCV +z-forward) from eye/target.
 
     Rows of R are the camera axes in world coords (x right, y down, z forward);
@@ -95,7 +97,9 @@ def _lookat_viewmats(eyes: np.ndarray, targets: np.ndarray, up: tuple[float, flo
     upv = np.broadcast_to(up, (n, 3)).astype(np.float64).copy()
     # swap in an alternate up where it is (nearly) parallel to the view direction
     par = np.abs(z @ up) > 0.99
-    upv[par] = np.array([0.0, 0.0, 1.0]) if abs(up[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+    upv[par] = (
+        np.array([0.0, 0.0, 1.0]) if abs(up[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+    )
     x = np.cross(upv, z)
     x /= np.linalg.norm(x, axis=1, keepdims=True) + 1e-12
     y = np.cross(z, x)
@@ -115,11 +119,18 @@ def _cam_centers(viewmats: np.ndarray) -> np.ndarray:
     return -np.einsum("nji,nj->ni", R, t)
 
 
-def sample_poses(means: np.ndarray, opacities: np.ndarray, n_views: int, seed: int = 0,
-                 viewmats: np.ndarray | None = None,
-                 bbox_lo: float = 20.0, bbox_hi: float = 80.0, min_dist: float = 0.2,
-                 up: tuple[float, float, float] = (0.0, 0.0, 1.0),
-                 traj_frac: float = 0.5) -> np.ndarray:
+def sample_poses(
+    means: np.ndarray,
+    opacities: np.ndarray,
+    n_views: int,
+    seed: int = 0,
+    viewmats: np.ndarray | None = None,
+    bbox_lo: float = 20.0,
+    bbox_hi: float = 80.0,
+    min_dist: float = 0.2,
+    up: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    traj_frac: float = 0.5,
+) -> np.ndarray:
     """Synthesize ``n_views`` in-scene world-to-camera matrices (n,4,4).
 
     Camera positions are drawn uniformly inside the *inner* opacity-weighted
@@ -176,11 +187,18 @@ def sample_poses(means: np.ndarray, opacities: np.ndarray, n_views: int, seed: i
 # --------------------------------------------------------------------------- #
 # teacher rendering
 # --------------------------------------------------------------------------- #
-def render_views(teacher: Mapping[str, jax.Array | np.ndarray] | tuple, viewmats: np.ndarray,
-                 img_shape: tuple[int, int], f: tuple[float, float], c: tuple[float, float],
-                 depth: bool = False, background: np.ndarray | None = None,
-                 block_size: int = 16, glob_scale: float = 1.0,
-                 clip_thresh: float = 0.01) -> tuple[np.ndarray, np.ndarray | None]:
+def render_views(
+    teacher: Mapping[str, jax.Array | np.ndarray] | tuple,
+    viewmats: np.ndarray,
+    img_shape: tuple[int, int],
+    f: tuple[float, float],
+    c: tuple[float, float],
+    depth: bool = False,
+    background: np.ndarray | None = None,
+    block_size: int = 16,
+    glob_scale: float = 1.0,
+    clip_thresh: float = 0.01,
+) -> tuple[np.ndarray, np.ndarray | None]:
     """Render the teacher from ``viewmats`` (n,4,4), host-side, memory-safe.
 
     Returns ``(images, depths)``: a ``uint8`` array ``(n, H, W, 3)`` of frames,
@@ -206,16 +224,39 @@ def render_views(teacher: Mapping[str, jax.Array | np.ndarray] | tuple, viewmats
     for i in range(n):
         vm = jnp.asarray(vms[i])
         if depths is not None:
-            img, d = splax.render(means, scales, quats, colors, opac,
-                                  viewmat=vm, background=bg, render_depth=True,
-                                  img_shape=(H, W), f=f, c=c, glob_scale=glob_scale,
-                                  clip_thresh=clip_thresh, block_size=block_size)
+            img, d = splax.render(
+                means,
+                scales,
+                quats,
+                colors,
+                opac,
+                viewmat=vm,
+                background=bg,
+                render_depth=True,
+                img_shape=(H, W),
+                f=f,
+                c=c,
+                glob_scale=glob_scale,
+                clip_thresh=clip_thresh,
+                block_size=block_size,
+            )
             depths[i] = np.asarray(d, np.float16)
         else:
-            img = splax.inference.render(means, scales, quats, colors, opac,
-                                         viewmat=vm, background=bg,
-                                         img_shape=(H, W), f=f, c=c, glob_scale=glob_scale,
-                                         clip_thresh=clip_thresh, block_size=block_size)
+            img = splax.inference.render(
+                means,
+                scales,
+                quats,
+                colors,
+                opac,
+                viewmat=vm,
+                background=bg,
+                img_shape=(H, W),
+                f=f,
+                c=c,
+                glob_scale=glob_scale,
+                clip_thresh=clip_thresh,
+                block_size=block_size,
+            )
         imgs[i] = (np.clip(np.asarray(img), 0.0, 1.0) * 255.0).astype(np.uint8)
     return imgs, depths
 
@@ -228,8 +269,13 @@ def _logit(x: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     return np.log(x / (1.0 - x)).astype(np.float32)
 
 
-def _student_init(teacher: Mapping[str, jax.Array | np.ndarray] | tuple, n_student: int, init: str,
-                  seed: int, init_opa: float) -> dict[str, jax.Array]:
+def _student_init(
+    teacher: Mapping[str, jax.Array | np.ndarray] | tuple,
+    n_student: int,
+    init: str,
+    seed: int,
+    init_opa: float,
+) -> dict[str, jax.Array]:
     """Build the raw (logit-space) student param dict from the teacher.
 
     ``prune``: the top-``n_student``-opacity teacher subset, all params kept.
@@ -244,7 +290,9 @@ def _student_init(teacher: Mapping[str, jax.Array | np.ndarray] | tuple, n_stude
         sel = np.argsort(-opac1)[:n_student]
         return {
             "means": jnp.asarray(means[sel], jnp.float32),
-            "log_scales": jnp.asarray(np.log(np.clip(scales[sel], 1e-8, None)), jnp.float32),
+            "log_scales": jnp.asarray(
+                np.log(np.clip(scales[sel], 1e-8, None)), jnp.float32
+            ),
             "quats": jnp.asarray(quats[sel], jnp.float32),
             "colors_logit": jnp.asarray(_logit(colors[sel]), jnp.float32),
             "opac_logit": jnp.asarray(_logit(opac1[sel])[:, None], jnp.float32),
@@ -262,14 +310,21 @@ def _student_init(teacher: Mapping[str, jax.Array | np.ndarray] | tuple, n_stude
             "log_scales": jnp.asarray(ls),
             "quats": jnp.asarray(q),
             "colors_logit": jnp.asarray(_logit(col)),
-            "opac_logit": jnp.full((n_student, 1), float(_logit(np.array(init_opa))), jnp.float32),
+            "opac_logit": jnp.full(
+                (n_student, 1), float(_logit(np.array(init_opa))), jnp.float32
+            ),
         }
     raise ValueError(f"unknown init {init!r} (expected 'prune' or 'random')")
 
 
-def _render_student(p: dict[str, jax.Array], viewmat: jax.Array, H: int, W: int,
-                    intr: tuple[float, float, float, float],
-                    render_depth: bool = False) -> tuple[jax.Array, jax.Array | None]:
+def _render_student(
+    p: dict[str, jax.Array],
+    viewmat: jax.Array,
+    H: int,
+    W: int,
+    intr: tuple[float, float, float, float],
+    render_depth: bool = False,
+) -> tuple[jax.Array, jax.Array | None]:
     fx, fy, cx, cy = intr
     means = p["means"]
     scales = jnp.exp(p["log_scales"])
@@ -277,9 +332,18 @@ def _render_student(p: dict[str, jax.Array], viewmat: jax.Array, H: int, W: int,
     colors = jax.nn.sigmoid(p["colors_logit"])
     opac = jax.nn.sigmoid(p["opac_logit"])
     return splax.render(
-        means, scales, quats, colors, opac,
-        viewmat=viewmat, background=jnp.ones(3), img_shape=(H, W),
-        f=(fx, fy), c=(cx, cy), glob_scale=1.0, clip_thresh=0.01,
+        means,
+        scales,
+        quats,
+        colors,
+        opac,
+        viewmat=viewmat,
+        background=jnp.ones(3),
+        img_shape=(H, W),
+        f=(fx, fy),
+        c=(cx, cy),
+        glob_scale=1.0,
+        clip_thresh=0.01,
         render_depth=render_depth,
     )
 
@@ -289,7 +353,8 @@ def _to_render_space(p: dict[str, jax.Array]) -> dict[str, jax.Array]:
     return {
         "means": p["means"],
         "scales": jnp.exp(p["log_scales"]),
-        "quats": p["quats"] / (jnp.linalg.norm(p["quats"], axis=-1, keepdims=True) + 1e-8),
+        "quats": p["quats"]
+        / (jnp.linalg.norm(p["quats"], axis=-1, keepdims=True) + 1e-8),
         "colors": jax.nn.sigmoid(p["colors_logit"]),
         "opacities": jax.nn.sigmoid(p["opac_logit"]),
     }
@@ -298,7 +363,9 @@ def _to_render_space(p: dict[str, jax.Array]) -> dict[str, jax.Array]:
 # --------------------------------------------------------------------------- #
 # training step
 # --------------------------------------------------------------------------- #
-def _reset_opt_state(opt_state: optax.OptState, reset_mask: jax.Array) -> optax.OptState:
+def _reset_opt_state(
+    opt_state: optax.OptState, reset_mask: jax.Array
+) -> optax.OptState:
     n = reset_mask.shape[0]
     keep = (~reset_mask).astype(jnp.float32)
 
@@ -310,17 +377,25 @@ def _reset_opt_state(opt_state: optax.OptState, reset_mask: jax.Array) -> optax.
     return jax.tree.map(z, opt_state)
 
 
-def _make_step(opt: optax.GradientTransformation, H: int, W: int,
-               intr: tuple[float, float, float, float], ssim_lambda: float,
-               opacity_reg: float, scale_reg: float, depth_lambda: float) -> Callable:
+def _make_step(
+    opt: optax.GradientTransformation,
+    H: int,
+    W: int,
+    intr: tuple[float, float, float, float],
+    ssim_lambda: float,
+    opacity_reg: float,
+    scale_reg: float,
+    depth_lambda: float,
+) -> Callable:
     """Jitted train step mirroring ``scripts/train_colmap.py``'s step builder, with
     optional *dense* depth distillation (masked, scale-normalized L1 between the
     student and teacher expected-depth maps) in place of the sparse-point depth loss.
     """
     depth_on = depth_lambda > 0.0
 
-    def per_view(p: dict[str, jax.Array], gt: jax.Array, vm: jax.Array,
-                 gt_depth: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+    def per_view(
+        p: dict[str, jax.Array], gt: jax.Array, vm: jax.Array, gt_depth: jax.Array
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
         if depth_on:
             img, depth = _render_student(p, vm, H, W, intr, render_depth=True)
             assert depth is not None  # render_depth=True fills the depth slot
@@ -335,9 +410,12 @@ def _make_step(opt: optax.GradientTransformation, H: int, W: int,
         dssim = jnp.asarray(1.0 - dm_pix.ssim(img, gt))
         return l1, dssim, dl
 
-    def loss_fn(p: dict[str, jax.Array], gt: jax.Array, vm: jax.Array,
-                gt_depth: jax.Array) -> tuple[jax.Array, jax.Array]:
-        l1s, dssims, dls = jax.vmap(per_view, in_axes=(None, 0, 0, 0))(p, gt, vm, gt_depth)
+    def loss_fn(
+        p: dict[str, jax.Array], gt: jax.Array, vm: jax.Array, gt_depth: jax.Array
+    ) -> tuple[jax.Array, jax.Array]:
+        l1s, dssims, dls = jax.vmap(per_view, in_axes=(None, 0, 0, 0))(
+            p, gt, vm, gt_depth
+        )
         l1 = jnp.mean(l1s)
         loss = (1.0 - ssim_lambda) * l1 + ssim_lambda * jnp.mean(dssims)
         loss = loss + opacity_reg * jnp.mean(jax.nn.sigmoid(p["opac_logit"]))
@@ -347,9 +425,16 @@ def _make_step(opt: optax.GradientTransformation, H: int, W: int,
         return loss, l1
 
     @jax.jit
-    def step(p: dict[str, jax.Array], opt_state: optax.OptState, gt: jax.Array,
-             vm: jax.Array, gt_depth: jax.Array) -> tuple[dict[str, jax.Array], optax.OptState, jax.Array]:
-        (loss, l1), grads = jax.value_and_grad(loss_fn, has_aux=True)(p, gt, vm, gt_depth)
+    def step(
+        p: dict[str, jax.Array],
+        opt_state: optax.OptState,
+        gt: jax.Array,
+        vm: jax.Array,
+        gt_depth: jax.Array,
+    ) -> tuple[dict[str, jax.Array], optax.OptState, jax.Array]:
+        (loss, l1), grads = jax.value_and_grad(loss_fn, has_aux=True)(
+            p, gt, vm, gt_depth
+        )
         updates, opt_state = opt.update(grads, opt_state, p)
         # apply_updates is typed as the broad optax ArrayTree; the params stay a dict.
         new_p = cast(dict[str, jax.Array], optax.apply_updates(p, updates))
@@ -361,18 +446,39 @@ def _make_step(opt: optax.GradientTransformation, H: int, W: int,
 # --------------------------------------------------------------------------- #
 # distillation driver
 # --------------------------------------------------------------------------- #
-def distill(teacher: Mapping[str, jax.Array | np.ndarray] | tuple, n_student: int, *,
-            img_shape: tuple[int, int], f: tuple[float, float], c: tuple[float, float],
-            n_views: int = 500, steps: int = 3000,
-            depth_lambda: float = 0.0, init: str = "prune", seed: int = 0,
-            viewmats: np.ndarray | None = None, batch: int = 1,
-            means_lr: float = 1.5e-3, scales_lr: float = 5e-3, quats_lr: float = 1e-3,
-            colors_lr: float = 1e-2, opac_lr: float = 5e-2, ssim_lambda: float = 0.2,
-            opacity_reg: float = 0.01, scale_reg: float = 0.01,
-            noise_lr: float = 5e5, noise_stop_iter: int = -1, min_opacity: float = 0.005,
-            init_opa: float = 0.1, relocate_every: int = 100, refine_start: int = 200,
-            refine_stop: int | None = None, log_every: int = 200,
-            eval_hook: Callable | None = None, info: dict | None = None) -> dict[str, jax.Array]:
+def distill(
+    teacher: Mapping[str, jax.Array | np.ndarray] | tuple,
+    n_student: int,
+    *,
+    img_shape: tuple[int, int],
+    f: tuple[float, float],
+    c: tuple[float, float],
+    n_views: int = 500,
+    steps: int = 3000,
+    depth_lambda: float = 0.0,
+    init: str = "prune",
+    seed: int = 0,
+    viewmats: np.ndarray | None = None,
+    batch: int = 1,
+    means_lr: float = 1.5e-3,
+    scales_lr: float = 5e-3,
+    quats_lr: float = 1e-3,
+    colors_lr: float = 1e-2,
+    opac_lr: float = 5e-2,
+    ssim_lambda: float = 0.2,
+    opacity_reg: float = 0.01,
+    scale_reg: float = 0.01,
+    noise_lr: float = 5e5,
+    noise_stop_iter: int = -1,
+    min_opacity: float = 0.005,
+    init_opa: float = 0.1,
+    relocate_every: int = 100,
+    refine_start: int = 200,
+    refine_stop: int | None = None,
+    log_every: int = 200,
+    eval_hook: Callable | None = None,
+    info: dict | None = None,
+) -> dict[str, jax.Array]:
     """Distill ``teacher`` (render-space splat) into an ``n_student``-gaussian student.
 
     Renders the teacher from ``n_views`` synthetic in-scene poses (``sample_poses``,
@@ -414,20 +520,33 @@ def distill(teacher: Mapping[str, jax.Array | np.ndarray] | tuple, n_student: in
     opt = optax.multi_transform(txs, {k: k for k in params})
     opt_state = opt.init(params)
     binoms = splax.mcmc.make_binoms(51)
-    step_fn = _make_step(opt, H, W, intr, ssim_lambda, opacity_reg, scale_reg, depth_lambda)
+    step_fn = _make_step(
+        opt, H, W, intr, ssim_lambda, opacity_reg, scale_reg, depth_lambda
+    )
 
     @jax.jit
-    def relocate(p: dict[str, jax.Array], opt_state: optax.OptState,
-                 key: jax.Array) -> tuple[dict[str, jax.Array], optax.OptState]:
+    def relocate(
+        p: dict[str, jax.Array], opt_state: optax.OptState, key: jax.Array
+    ) -> tuple[dict[str, jax.Array], optax.OptState]:
         new, reset = splax.mcmc.relocate(
-            key, p["means"], p["log_scales"], p["quats"], p["colors_logit"],
-            p["opac_logit"], binoms, min_opacity=min_opacity)
+            key,
+            p["means"],
+            p["log_scales"],
+            p["quats"],
+            p["colors_logit"],
+            p["opac_logit"],
+            binoms,
+            min_opacity=min_opacity,
+        )
         return new, _reset_opt_state(opt_state, reset)
 
     @jax.jit
-    def add_noise(p: dict[str, jax.Array], key: jax.Array, scaler: float) -> dict[str, jax.Array]:
+    def add_noise(
+        p: dict[str, jax.Array], key: jax.Array, scaler: float
+    ) -> dict[str, jax.Array]:
         m = splax.mcmc.inject_noise(
-            key, p["means"], p["log_scales"], p["quats"], p["opac_logit"], scaler)
+            key, p["means"], p["log_scales"], p["quats"], p["opac_logit"], scaler
+        )
         return {**p, "means": m}
 
     # --- training loop --------------------------------------------------------
@@ -452,7 +571,11 @@ def distill(teacher: Mapping[str, jax.Array | np.ndarray] | tuple, n_student: in
         if rel_every and ref_start < it < refine_stop and it % rel_every == 0:
             key, sk = jax.random.split(key)
             params, opt_state = relocate(params, opt_state, sk)
-        if noise_lr > 0 and it < steps and (noise_stop_iter < 0 or it < noise_stop_iter):
+        if (
+            noise_lr > 0
+            and it < steps
+            and (noise_stop_iter < 0 or it < noise_stop_iter)
+        ):
             scaler = float(jnp.asarray(means_sched(it))) * noise_lr
             key, sk = jax.random.split(key)
             params = add_noise(params, sk, scaler)
@@ -461,16 +584,27 @@ def distill(teacher: Mapping[str, jax.Array | np.ndarray] | tuple, n_student: in
             l1.block_until_ready()
             entry = {"step": it, "train_l1": round(float(l1), 5)}
             if eval_hook is not None:
-                entry["eval_psnr"] = round(float(eval_hook(_to_render_space(params))), 3)
+                entry["eval_psnr"] = round(
+                    float(eval_hook(_to_render_space(params))), 3
+                )
             curve.append(entry)
     wall = time.perf_counter() - t0
 
     student = _to_render_space(params)
     if info is not None:
-        info.update({"curve": curve, "wall": wall, "n_views": n_views,
-                     "teacher_n": int(t_means.shape[0]), "n_student": int(n_student),
-                     "steps": steps, "batch": B, "depth_lambda": depth_lambda,
-                     "init": init})
+        info.update(
+            {
+                "curve": curve,
+                "wall": wall,
+                "n_views": n_views,
+                "teacher_n": int(t_means.shape[0]),
+                "n_student": int(n_student),
+                "steps": steps,
+                "batch": B,
+                "depth_lambda": depth_lambda,
+                "init": init,
+            }
+        )
     return student
 
 

@@ -167,9 +167,7 @@ def test_grad_parity_vs_gsplat(
     weight = None if which == "sum" else np.asarray(w)
 
     g_sp = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*args)
-    g_gs = gref.grad(
-        *args, viewmat=vm, background=bg, **_pk(H, W), weight=weight
-    )
+    g_gs = gref.grad(*args, viewmat=vm, background=bg, **_pk(H, W), weight=weight)
 
     qn = np.asarray(quats)
     for name, a, b in zip(["means", "scales", "quats", "colors", "opac"], g_sp, g_gs):
@@ -204,7 +202,9 @@ def test_finite_difference(path: str) -> None:
     render = _splax_legacy if path == "legacy" else _splax_tight
     w = jax.random.uniform(jax.random.key(5), (H, W, 3))
 
-    def loss(m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array) -> jax.Array:
+    def loss(
+        m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array
+    ) -> jax.Array:
         # Linear, mean-reduced loss: keeps the loss magnitude small (float32 render
         # -> minimal FD cancellation) while giving an O(1) gradient over all five
         # parameter arrays at once (~4800 perturbed entries).
@@ -238,7 +238,9 @@ def test_grad_under_jit() -> None:
     args = (means, scales, quats, colors, opac)
     loss = _losses(H, W)["wmse"]
 
-    def sp(m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array) -> jax.Array:
+    def sp(
+        m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array
+    ) -> jax.Array:
         return _splax_legacy(m, s, q, c, o, bg, vm, H, W)
 
     g_eager = jax.grad(loss(sp), argnums=(0, 1, 2, 3, 4))(*args)

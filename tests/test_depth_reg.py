@@ -96,13 +96,28 @@ def test_depth_render_single_gaussian() -> None:
 
     # accumulated alpha A = Σ wᵢ : unit colour over a black background.
     img, _ = splax.render(
-        means, scales, quats, jnp.ones((1, 3)), opac,
-        viewmat=vm, background=black, block_size=16, **_pk(H, W),
+        means,
+        scales,
+        quats,
+        jnp.ones((1, 3)),
+        opac,
+        viewmat=vm,
+        background=black,
+        block_size=16,
+        **_pk(H, W),
     )
     A = img[..., 0]
     _img, depth = splax.render(
-        means, scales, quats, jnp.array([[0.5, 0.5, 0.5]]), opac,
-        viewmat=vm, background=black, render_depth=True, block_size=16, **_pk(H, W),
+        means,
+        scales,
+        quats,
+        jnp.array([[0.5, 0.5, 0.5]]),
+        opac,
+        viewmat=vm,
+        background=black,
+        render_depth=True,
+        block_size=16,
+        **_pk(H, W),
     )
     A = np.asarray(A)
     depth = np.asarray(depth)
@@ -136,10 +151,20 @@ def test_depth_grad_finite_difference(mode: str) -> None:
     wd = jax.random.uniform(jax.random.key(9), (H, W))
     wc = jax.random.uniform(jax.random.key(10), (H, W, 3))
 
-    def loss(m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array) -> jax.Array:
+    def loss(
+        m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array
+    ) -> jax.Array:
         img, depth = splax.render(
-            m, s, q, c, o, viewmat=vm, background=bg,
-            render_depth=True, block_size=16, **_pk(H, W),
+            m,
+            s,
+            q,
+            c,
+            o,
+            viewmat=vm,
+            background=bg,
+            render_depth=True,
+            block_size=16,
+            **_pk(H, W),
         )
         assert depth is not None  # render_depth=True fills the depth slot
         dl = jnp.mean(wd * depth)
@@ -161,7 +186,9 @@ def test_depth_grad_finite_difference(mode: str) -> None:
     minus = [a - eps * d for a, d in zip(args, dirs)]
     numeric = (float(loss(*plus)) - float(loss(*minus))) / (2 * eps)
     rel = abs(analytic - numeric) / (abs(numeric) + 1e-12)
-    assert rel < 8e-2, f"{mode} FD mismatch: {analytic:.6e} vs {numeric:.6e} (rel {rel:.2e})"
+    assert rel < 8e-2, (
+        f"{mode} FD mismatch: {analytic:.6e} vs {numeric:.6e} (rel {rel:.2e})"
+    )
 
 
 def test_depth_grad_under_jit() -> None:
@@ -170,10 +197,20 @@ def test_depth_grad_under_jit() -> None:
     wd = jax.random.uniform(jax.random.key(4), (H, W))
     args = (means, scales, quats, colors, opac)
 
-    def loss(m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array) -> jax.Array:
+    def loss(
+        m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array
+    ) -> jax.Array:
         _img, depth = splax.render(
-            m, s, q, c, o, viewmat=vm, background=bg,
-            render_depth=True, block_size=16, **_pk(H, W),
+            m,
+            s,
+            q,
+            c,
+            o,
+            viewmat=vm,
+            background=bg,
+            render_depth=True,
+            block_size=16,
+            **_pk(H, W),
         )
         assert depth is not None  # render_depth=True fills the depth slot
         return jnp.mean(wd * depth)
@@ -194,8 +231,16 @@ def test_depth_grad_under_vmap_matches_sequential() -> None:
 
     def loss(m: jax.Array) -> jax.Array:
         _img, depth = splax.render(
-            m, scales, quats, colors, opac, viewmat=vm, background=bg,
-            render_depth=True, block_size=16, **_pk(H, W),
+            m,
+            scales,
+            quats,
+            colors,
+            opac,
+            viewmat=vm,
+            background=bg,
+            render_depth=True,
+            block_size=16,
+            **_pk(H, W),
         )
         assert depth is not None  # render_depth=True fills the depth slot
         return jnp.sum(wd * depth)

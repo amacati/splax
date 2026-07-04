@@ -32,9 +32,15 @@ def _quat_to_rotmat(q: wp.vec4) -> wp.mat33:
     z = q[3]
     # standard row-major rotation matrix (matches glm column-major helper)
     return wp.mat33(
-        1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y),
-        2.0 * (x * y + w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x),
-        2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y),
+        1.0 - 2.0 * (y * y + z * z),
+        2.0 * (x * y - w * z),
+        2.0 * (x * z + w * y),
+        2.0 * (x * y + w * z),
+        1.0 - 2.0 * (x * x + z * z),
+        2.0 * (y * z - w * x),
+        2.0 * (x * z - w * y),
+        2.0 * (y * z + w * x),
+        1.0 - 2.0 * (x * x + y * y),
     )
 
 
@@ -78,8 +84,15 @@ class AccuSetup:
 
 @wp.func
 def _ellipse_intersection(
-    A: wp.float32, B: wp.float32, C: wp.float32, disc: wp.float32, t: wp.float32,
-    px: wp.float32, py: wp.float32, isY: wp.int32, coord: wp.float32,
+    A: wp.float32,
+    B: wp.float32,
+    C: wp.float32,
+    disc: wp.float32,
+    t: wp.float32,
+    px: wp.float32,
+    py: wp.float32,
+    isY: wp.int32,
+    coord: wp.float32,
 ) -> wp.vec2:
     # gsplat accutile_ellipse_intersection: where the boundary line u=coord meets
     # the ellipse, giving the [lower, upper] extent of the cross axis at that line.
@@ -93,14 +106,22 @@ def _ellipse_intersection(
         coeff = C
     h = coord - p_u
     sqrt_term = wp.sqrt(disc * h * h + t * coeff)
-    return wp.vec2((-B * h - sqrt_term) / coeff + p_v, (-B * h + sqrt_term) / coeff + p_v)
+    return wp.vec2(
+        (-B * h - sqrt_term) / coeff + p_v, (-B * h + sqrt_term) / coeff + p_v
+    )
 
 
 @wp.func
 def _accutile_setup(
-    A: wp.float32, B: wp.float32, C: wp.float32, t: wp.float32,
-    px: wp.float32, py: wp.float32,
-    tile_size: wp.int32, tile_width: wp.int32, tile_height: wp.int32,
+    A: wp.float32,
+    B: wp.float32,
+    C: wp.float32,
+    t: wp.float32,
+    px: wp.float32,
+    py: wp.float32,
+    tile_size: wp.int32,
+    tile_width: wp.int32,
+    tile_height: wp.int32,
 ) -> AccuSetup:
     # SNUGBOX tight AABB of the ellipse + tile rectangle, then pick the shorter tile
     # span as the walk's outer axis (isY). Faithful to IntersectTile.cu:210-252.
@@ -161,19 +182,25 @@ def _accutile_first_imin(s: AccuSetup, block: wp.float32) -> wp.vec2:
     # that line lies outside the ellipse bbox.
     min_line0 = wp.float32(s.rect_min[0]) * block
     if s.bbox_min[0] <= min_line0:
-        return _ellipse_intersection(s.A, s.B, s.C, s.disc, s.t, s.px, s.py, s.isY, min_line0)
+        return _ellipse_intersection(
+            s.A, s.B, s.C, s.disc, s.t, s.px, s.py, s.isY, min_line0
+        )
     return wp.vec2(s.bbox_max[1], s.bbox_min[1])
 
 
 @wp.func
-def _accutile_col(u: wp.int32, s: AccuSetup, block: wp.float32, I_min: wp.vec2) -> wp.vec4:
+def _accutile_col(
+    u: wp.int32, s: AccuSetup, block: wp.float32, I_min: wp.vec2
+) -> wp.vec4:
     # One outer column of the AccuTile walk: returns (min_tile_v, max_tile_v, I_max)
     # where I_max feeds the next column as its I_min (gsplat's rolling
     # intersect_min_line = intersect_max_line). Cross-axis tile range [min_v, max_v).
     min_line = wp.float32(u) * block
     max_line = min_line + block
     if max_line <= s.bbox_max[0]:
-        I_max = _ellipse_intersection(s.A, s.B, s.C, s.disc, s.t, s.px, s.py, s.isY, max_line)
+        I_max = _ellipse_intersection(
+            s.A, s.B, s.C, s.disc, s.t, s.px, s.py, s.isY, max_line
+        )
     else:
         I_max = I_min
     if (min_line <= s.bbox_argmin[1]) and (s.bbox_argmin[1] < max_line):
@@ -185,7 +212,9 @@ def _accutile_col(u: wp.int32, s: AccuSetup, block: wp.float32, I_min: wp.vec2) 
     else:
         ellipse_max = wp.max(I_min[1], I_max[1])
     min_v = wp.max(s.rect_min[1], wp.min(s.rect_max[1], wp.int32(ellipse_min / block)))
-    max_v = wp.min(s.rect_max[1], wp.max(s.rect_min[1], wp.int32(ellipse_max / block + 1.0)))
+    max_v = wp.min(
+        s.rect_max[1], wp.max(s.rect_min[1], wp.int32(ellipse_max / block + 1.0))
+    )
     return wp.vec4(wp.float32(min_v), wp.float32(max_v), I_max[0], I_max[1])
 
 
@@ -262,9 +291,24 @@ def _project_kernel(
     mz = mean[2]
 
     # clip_near_plane: p_view = viewmat @ mean (row-major 4x3)
-    pvx = viewmat[vb + 0, 0] * mx + viewmat[vb + 0, 1] * my + viewmat[vb + 0, 2] * mz + viewmat[vb + 0, 3]
-    pvy = viewmat[vb + 1, 0] * mx + viewmat[vb + 1, 1] * my + viewmat[vb + 1, 2] * mz + viewmat[vb + 1, 3]
-    pvz = viewmat[vb + 2, 0] * mx + viewmat[vb + 2, 1] * my + viewmat[vb + 2, 2] * mz + viewmat[vb + 2, 3]
+    pvx = (
+        viewmat[vb + 0, 0] * mx
+        + viewmat[vb + 0, 1] * my
+        + viewmat[vb + 0, 2] * mz
+        + viewmat[vb + 0, 3]
+    )
+    pvy = (
+        viewmat[vb + 1, 0] * mx
+        + viewmat[vb + 1, 1] * my
+        + viewmat[vb + 1, 2] * mz
+        + viewmat[vb + 1, 3]
+    )
+    pvz = (
+        viewmat[vb + 2, 0] * mx
+        + viewmat[vb + 2, 1] * my
+        + viewmat[vb + 2, 2] * mz
+        + viewmat[vb + 2, 3]
+    )
     if pvz <= clip_thresh:
         return
 
@@ -276,17 +320,29 @@ def _project_kernel(
     sz = glob_scale * s[2]
     # M = R @ diag(sx, sy, sz)
     M = wp.mat33(
-        R[0, 0] * sx, R[0, 1] * sy, R[0, 2] * sz,
-        R[1, 0] * sx, R[1, 1] * sy, R[1, 2] * sz,
-        R[2, 0] * sx, R[2, 1] * sy, R[2, 2] * sz,
+        R[0, 0] * sx,
+        R[0, 1] * sy,
+        R[0, 2] * sz,
+        R[1, 0] * sx,
+        R[1, 1] * sy,
+        R[1, 2] * sz,
+        R[2, 0] * sx,
+        R[2, 1] * sy,
+        R[2, 2] * sz,
     )
     V3 = M * wp.transpose(M)  # 3d covariance
 
     # project_cov3d_ewa
     W = wp.mat33(
-        viewmat[vb + 0, 0], viewmat[vb + 0, 1], viewmat[vb + 0, 2],
-        viewmat[vb + 1, 0], viewmat[vb + 1, 1], viewmat[vb + 1, 2],
-        viewmat[vb + 2, 0], viewmat[vb + 2, 1], viewmat[vb + 2, 2],
+        viewmat[vb + 0, 0],
+        viewmat[vb + 0, 1],
+        viewmat[vb + 0, 2],
+        viewmat[vb + 1, 0],
+        viewmat[vb + 1, 1],
+        viewmat[vb + 1, 2],
+        viewmat[vb + 2, 0],
+        viewmat[vb + 2, 1],
+        viewmat[vb + 2, 2],
     )
     tan_fovx = 0.5 * wp.float32(img_w) / fx
     tan_fovy = 0.5 * wp.float32(img_h) / fy
@@ -301,9 +357,15 @@ def _project_kernel(
     rz = 1.0 / tz
     rz2 = rz * rz
     J = wp.mat33(
-        fx * rz, 0.0, -fx * tx * rz2,
-        0.0, fy * rz, -fy * ty * rz2,
-        0.0, 0.0, 0.0,
+        fx * rz,
+        0.0,
+        -fx * tx * rz2,
+        0.0,
+        fy * rz,
+        -fy * ty * rz2,
+        0.0,
+        0.0,
+        0.0,
     )
     T = J * W
     cov = T * V3 * wp.transpose(T)
@@ -344,8 +406,12 @@ def _project_kernel(
         if radius_x <= 0.0 and radius_y <= 0.0:
             return
         # off-image reject (gsplat ProjectionEWA3DGSFused.cu:215)
-        if (center_x + radius_x <= 0.0 or center_x - radius_x >= wp.float32(img_w)
-                or center_y + radius_y <= 0.0 or center_y - radius_y >= wp.float32(img_h)):
+        if (
+            center_x + radius_x <= 0.0
+            or center_x - radius_x >= wp.float32(img_w)
+            or center_y + radius_y <= 0.0
+            or center_y - radius_y >= wp.float32(img_h)
+        ):
             return
         setup = _accutile_setup(
             conic[0], conic[1], conic[2], t, center_x, center_y, block_width, tb_x, tb_y
@@ -425,9 +491,27 @@ def _project_launch(
         _project_kernel,
         dim=total,
         inputs=[
-            means3d, scales, quats, viewmat, opacities,
-            n, sel_means, sel_scales, sel_quats, sel_view, sel_opac, has_opac,
-            img_h, img_w, fx, fy, cx, cy, glob_scale, clip_thresh, block_width,
+            means3d,
+            scales,
+            quats,
+            viewmat,
+            opacities,
+            n,
+            sel_means,
+            sel_scales,
+            sel_quats,
+            sel_view,
+            sel_opac,
+            has_opac,
+            img_h,
+            img_w,
+            fx,
+            fy,
+            cx,
+            cy,
+            glob_scale,
+            clip_thresh,
+            block_width,
         ],
         outputs=[xys, depths, radii, conics, num_tiles_hit],
     )
@@ -512,27 +596,27 @@ VIEW_BLOCK = wp.constant(256)  # threads per block for the tile_sum v_viewmat re
 
 @wp.struct
 class _Geom:
-    W: wp.mat33      # upper-left 3x3 of the row-major viewmat (== camera rotation)
-    R: wp.mat33      # quaternion rotation
-    M: wp.mat33      # R diag(glob_scale*scale)
-    V: wp.mat33      # world covariance M Mᵀ
-    J: wp.mat33      # EWA jacobian (rebuilt from unclamped t)
-    T: wp.mat33      # J W
-    tx: wp.float32   # camera-space position (unclamped)
+    W: wp.mat33  # upper-left 3x3 of the row-major viewmat (== camera rotation)
+    R: wp.mat33  # quaternion rotation
+    M: wp.mat33  # R diag(glob_scale*scale)
+    V: wp.mat33  # world covariance M Mᵀ
+    J: wp.mat33  # EWA jacobian (rebuilt from unclamped t)
+    T: wp.mat33  # J W
+    tx: wp.float32  # camera-space position (unclamped)
     ty: wp.float32
     tz: wp.float32
     rz2: wp.float32
     rz3: wp.float32
-    sx: wp.float32   # glob_scale*scale
+    sx: wp.float32  # glob_scale*scale
     sy: wp.float32
     sz: wp.float32
 
 
 @wp.struct
 class _VP:
-    v_p: wp.vec3     # grad wrt camera-space position t (pix + depth + EWA)
-    v_T: wp.mat33    # grad wrt T = J W
-    v_V: wp.mat33    # grad wrt world covariance V
+    v_p: wp.vec3  # grad wrt camera-space position t (pix + depth + EWA)
+    v_T: wp.mat33  # grad wrt T = J W
+    v_V: wp.mat33  # grad wrt world covariance V
 
 
 @wp.struct
@@ -543,9 +627,14 @@ class _SQ:
 
 @wp.func
 def _recompute_geom(
-    mean: wp.vec3, quat: wp.vec4, scale: wp.vec3,
-    W: wp.mat33, trans: wp.vec3, glob_scale: wp.float32,
-    fx: wp.float32, fy: wp.float32,
+    mean: wp.vec3,
+    quat: wp.vec4,
+    scale: wp.vec3,
+    W: wp.mat33,
+    trans: wp.vec3,
+    glob_scale: wp.float32,
+    fx: wp.float32,
+    fy: wp.float32,
 ) -> _Geom:
     g = _Geom()
     g.W = W
@@ -560,9 +649,15 @@ def _recompute_geom(
     g.rz2 = rz2
     g.rz3 = rz2 * rz
     J = wp.mat33(
-        fx * rz, 0.0, -fx * tx * rz2,
-        0.0, fy * rz, -fy * ty * rz2,
-        0.0, 0.0, 0.0,
+        fx * rz,
+        0.0,
+        -fx * tx * rz2,
+        0.0,
+        fy * rz,
+        -fy * ty * rz2,
+        0.0,
+        0.0,
+        0.0,
     )
     g.J = J
     g.T = J * W
@@ -575,9 +670,15 @@ def _recompute_geom(
     g.sy = sy
     g.sz = sz
     M = wp.mat33(
-        R[0, 0] * sx, R[0, 1] * sy, R[0, 2] * sz,
-        R[1, 0] * sx, R[1, 1] * sy, R[1, 2] * sz,
-        R[2, 0] * sx, R[2, 1] * sy, R[2, 2] * sz,
+        R[0, 0] * sx,
+        R[0, 1] * sy,
+        R[0, 2] * sz,
+        R[1, 0] * sx,
+        R[1, 1] * sy,
+        R[1, 2] * sz,
+        R[2, 0] * sx,
+        R[2, 1] * sy,
+        R[2, 2] * sz,
     )
     g.M = M
     g.V = M * wp.transpose(M)
@@ -606,8 +707,12 @@ def _vcov2d_from_conic(conic: wp.vec3, v_conic: wp.vec3) -> wp.vec3:
 
 @wp.func
 def _vp_vT_vV(
-    g: _Geom, fx: wp.float32, fy: wp.float32,
-    v_xy: wp.vec2, v_depth: wp.float32, vcov2d: wp.vec3,
+    g: _Geom,
+    fx: wp.float32,
+    fy: wp.float32,
+    v_xy: wp.vec2,
+    v_depth: wp.float32,
+    vcov2d: wp.vec3,
 ) -> _VP:
     out = _VP()
     tx = g.tx
@@ -626,9 +731,15 @@ def _vp_vT_vV(
     vvz = vvz + v_depth
     # project_cov3d_ewa_vjp: cov = T V Tᵀ, T = J W.
     v_cov = wp.mat33(
-        vcov2d[0], 0.5 * vcov2d[1], 0.0,
-        0.5 * vcov2d[1], vcov2d[2], 0.0,
-        0.0, 0.0, 0.0,
+        vcov2d[0],
+        0.5 * vcov2d[1],
+        0.0,
+        0.5 * vcov2d[1],
+        vcov2d[2],
+        0.0,
+        0.0,
+        0.0,
+        0.0,
     )
     Tt = wp.transpose(g.T)
     out.v_V = Tt * v_cov * g.T  # df/dV (symmetric)
@@ -638,15 +749,19 @@ def _vp_vT_vV(
     v_t_x = -fx * rz2 * v_J[0, 2]
     v_t_y = -fy * rz2 * v_J[1, 2]
     v_t_z = (
-        -fx * rz2 * v_J[0, 0] + 2.0 * fx * tx * rz3 * v_J[0, 2]
-        - fy * rz2 * v_J[1, 1] + 2.0 * fy * ty * rz3 * v_J[1, 2]
+        -fx * rz2 * v_J[0, 0]
+        + 2.0 * fx * tx * rz3 * v_J[0, 2]
+        - fy * rz2 * v_J[1, 1]
+        + 2.0 * fy * ty * rz3 * v_J[1, 2]
     )
     out.v_p = wp.vec3(vvx + v_t_x, vvy + v_t_y, vvz + v_t_z)
     return out
 
 
 @wp.func
-def _scale_quat_vjp(g: _Geom, quat: wp.vec4, v_V: wp.mat33, glob_scale: wp.float32) -> _SQ:
+def _scale_quat_vjp(
+    g: _Geom, quat: wp.vec4, v_V: wp.mat33, glob_scale: wp.float32
+) -> _SQ:
     out = _SQ()
     vc0 = v_V[0, 0]
     vc1 = v_V[0, 1] + v_V[1, 0]
@@ -655,9 +770,15 @@ def _scale_quat_vjp(g: _Geom, quat: wp.vec4, v_V: wp.mat33, glob_scale: wp.float
     vc4 = v_V[1, 2] + v_V[2, 1]
     vc5 = v_V[2, 2]
     v_Vc = wp.mat33(
-        vc0, 0.5 * vc1, 0.5 * vc2,
-        0.5 * vc1, vc3, 0.5 * vc4,
-        0.5 * vc2, 0.5 * vc4, vc5,
+        vc0,
+        0.5 * vc1,
+        0.5 * vc2,
+        0.5 * vc1,
+        vc3,
+        0.5 * vc4,
+        0.5 * vc2,
+        0.5 * vc4,
+        vc5,
     )
     v_M = (v_Vc * g.M) * 2.0
     R = g.R
@@ -667,28 +788,42 @@ def _scale_quat_vjp(g: _Geom, quat: wp.vec4, v_V: wp.mat33, glob_scale: wp.float
         (R[0, 2] * v_M[0, 2] + R[1, 2] * v_M[1, 2] + R[2, 2] * v_M[2, 2]) * glob_scale,
     )
     v_R = wp.mat33(
-        v_M[0, 0] * g.sx, v_M[0, 1] * g.sy, v_M[0, 2] * g.sz,
-        v_M[1, 0] * g.sx, v_M[1, 1] * g.sy, v_M[1, 2] * g.sz,
-        v_M[2, 0] * g.sx, v_M[2, 1] * g.sy, v_M[2, 2] * g.sz,
+        v_M[0, 0] * g.sx,
+        v_M[0, 1] * g.sy,
+        v_M[0, 2] * g.sz,
+        v_M[1, 0] * g.sx,
+        v_M[1, 1] * g.sy,
+        v_M[1, 2] * g.sz,
+        v_M[2, 0] * g.sx,
+        v_M[2, 1] * g.sy,
+        v_M[2, 2] * g.sz,
     )
     w = quat[0]
     x = quat[1]
     y = quat[2]
     z = quat[3]
     vq_w = 2.0 * (
-        x * (v_R[2, 1] - v_R[1, 2]) + y * (v_R[0, 2] - v_R[2, 0]) + z * (v_R[1, 0] - v_R[0, 1])
+        x * (v_R[2, 1] - v_R[1, 2])
+        + y * (v_R[0, 2] - v_R[2, 0])
+        + z * (v_R[1, 0] - v_R[0, 1])
     )
     vq_x = 2.0 * (
-        -2.0 * x * (v_R[1, 1] + v_R[2, 2]) + y * (v_R[1, 0] + v_R[0, 1])
-        + z * (v_R[2, 0] + v_R[0, 2]) + w * (v_R[2, 1] - v_R[1, 2])
+        -2.0 * x * (v_R[1, 1] + v_R[2, 2])
+        + y * (v_R[1, 0] + v_R[0, 1])
+        + z * (v_R[2, 0] + v_R[0, 2])
+        + w * (v_R[2, 1] - v_R[1, 2])
     )
     vq_y = 2.0 * (
-        x * (v_R[1, 0] + v_R[0, 1]) - 2.0 * y * (v_R[0, 0] + v_R[2, 2])
-        + z * (v_R[2, 1] + v_R[1, 2]) + w * (v_R[0, 2] - v_R[2, 0])
+        x * (v_R[1, 0] + v_R[0, 1])
+        - 2.0 * y * (v_R[0, 0] + v_R[2, 2])
+        + z * (v_R[2, 1] + v_R[1, 2])
+        + w * (v_R[0, 2] - v_R[2, 0])
     )
     vq_z = 2.0 * (
-        x * (v_R[2, 0] + v_R[0, 2]) + y * (v_R[2, 1] + v_R[1, 2])
-        - 2.0 * z * (v_R[0, 0] + v_R[1, 1]) + w * (v_R[1, 0] - v_R[0, 1])
+        x * (v_R[2, 0] + v_R[0, 2])
+        + y * (v_R[2, 1] + v_R[1, 2])
+        - 2.0 * z * (v_R[0, 0] + v_R[1, 1])
+        + w * (v_R[1, 0] - v_R[0, 1])
     )
     out.v_quat = wp.vec4(vq_w, vq_x, vq_y, vq_z)
     return out
@@ -699,9 +834,15 @@ def _load_W_trans(viewmat: wp.array2d[wp.float32], vb: wp.int32):
     # Load the upper-left 3x3 W and translation from the viewmat row-block starting
     # at row ``vb`` (vb = image_id*4 under batching; 0 unbatched / broadcast viewmat).
     W = wp.mat33(
-        viewmat[vb + 0, 0], viewmat[vb + 0, 1], viewmat[vb + 0, 2],
-        viewmat[vb + 1, 0], viewmat[vb + 1, 1], viewmat[vb + 1, 2],
-        viewmat[vb + 2, 0], viewmat[vb + 2, 1], viewmat[vb + 2, 2],
+        viewmat[vb + 0, 0],
+        viewmat[vb + 0, 1],
+        viewmat[vb + 0, 2],
+        viewmat[vb + 1, 0],
+        viewmat[vb + 1, 1],
+        viewmat[vb + 1, 2],
+        viewmat[vb + 2, 0],
+        viewmat[vb + 2, 1],
+        viewmat[vb + 2, 2],
     )
     trans = wp.vec3(viewmat[vb + 0, 3], viewmat[vb + 1, 3], viewmat[vb + 2, 3])
     return W, trans
@@ -894,7 +1035,9 @@ def _project_bwd_view_tile_kernel(
         vb = wp.where(sel_view != 0, image_id, 0) * 4
         mean = means3d[m_idx]
         W, trans = _load_W_trans(viewmat, vb)
-        g = _recompute_geom(mean, quats[q_idx], scales[s_idx], W, trans, glob_scale, fx, fy)
+        g = _recompute_geom(
+            mean, quats[q_idx], scales[s_idx], W, trans, glob_scale, fx, fy
+        )
         vcov2d = _vcov2d_from_conic(conics[c_idx], v_conic_in[vc_idx])
         vp = _vp_vT_vV(g, fx, fy, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d)
         v_R, v_t = _view_grad(g, mean, vp)
@@ -963,7 +1106,9 @@ def _project_bwd_both_kernel(
         vb = wp.where(sel_view != 0, image_id, 0) * 4
         mean = means3d[m_idx]
         W, trans = _load_W_trans(viewmat, vb)
-        g = _recompute_geom(mean, quats[q_idx], scales[s_idx], W, trans, glob_scale, fx, fy)
+        g = _recompute_geom(
+            mean, quats[q_idx], scales[s_idx], W, trans, glob_scale, fx, fy
+        )
         vcov2d = _vcov2d_from_conic(conics[c_idx], v_conic_in[vc_idx])
         vp = _vp_vT_vV(g, fx, fy, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d)
         # gaussian grads: IDENTICAL composition/order to _project_bwd_kernel, so the
@@ -988,9 +1133,18 @@ def _project_bwd_both_kernel(
 _BWD_BLOCK = int(VIEW_BLOCK)
 
 
-def _bwd_selectors(n: int, viewmat: "wp.array | wp.array2d[wp.float32]", means3d: wp.array, scales: wp.array,
-                   quats: wp.array, radii: wp.array, conics: wp.array, v_xy: wp.array,
-                   v_depth: wp.array, v_conic: wp.array) -> tuple[int, ...]:
+def _bwd_selectors(
+    n: int,
+    viewmat: "wp.array | wp.array2d[wp.float32]",
+    means3d: wp.array,
+    scales: wp.array,
+    quats: wp.array,
+    radii: wp.array,
+    conics: wp.array,
+    v_xy: wp.array,
+    v_depth: wp.array,
+    v_conic: wp.array,
+) -> tuple[int, ...]:
     # B is recovered by the caller from an OUTPUT leading dim: under expand_dims JAX
     # always prepends the full batch B to every output, so an output is the only
     # reliable B signal. Each operand is independently batched (own leading dim
@@ -1005,9 +1159,18 @@ def _bwd_selectors(n: int, viewmat: "wp.array | wp.array2d[wp.float32]", means3d
     def sel(a: "wp.array | wp.array2d[wp.float32]", base: int) -> int:
         # every operand is a real wp.array at runtime; array2d is a stub-only alias.
         return 1 if cast(wp.array, a).shape[0] > base else 0
-    return (sel(means3d, n), sel(scales, n), sel(quats, n), sel(viewmat, 4),
-            sel(radii, n), sel(conics, n), sel(v_xy, n), sel(v_depth, n),
-            sel(v_conic, n))
+
+    return (
+        sel(means3d, n),
+        sel(scales, n),
+        sel(quats, n),
+        sel(viewmat, 4),
+        sel(radii, n),
+        sel(conics, n),
+        sel(v_xy, n),
+        sel(v_depth, n),
+        sel(v_conic, n),
+    )
 
 
 def _project_bwd_launch(
@@ -1030,16 +1193,31 @@ def _project_bwd_launch(
 ) -> None:
     n = num_gaussians
     B = v_mean3d.shape[0] // n
-    sels = _bwd_selectors(n, viewmat, means3d, scales, quats,
-                          radii, conics, v_xy, v_depth, v_conic)
+    sels = _bwd_selectors(
+        n, viewmat, means3d, scales, quats, radii, conics, v_xy, v_depth, v_conic
+    )
     v_mean3d.zero_()
     v_scale.zero_()
     v_quat.zero_()
     wp.launch(
         _project_bwd_kernel,
         dim=B * n,
-        inputs=[means3d, scales, quats, viewmat, radii, conics,
-                v_xy, v_depth, v_conic, n, *sels, fx, fy, glob_scale],
+        inputs=[
+            means3d,
+            scales,
+            quats,
+            viewmat,
+            radii,
+            conics,
+            v_xy,
+            v_depth,
+            v_conic,
+            n,
+            *sels,
+            fx,
+            fy,
+            glob_scale,
+        ],
         outputs=[v_mean3d, v_scale, v_quat],
         device=means3d.device,
     )
@@ -1068,17 +1246,32 @@ def _project_bwd_view_launch(
 ) -> None:
     n = num_gaussians
     B = v_viewmat.shape[0] // 4
-    sels = _bwd_selectors(n, viewmat, means3d, scales, quats,
-                          radii, conics, v_xy, v_depth, v_conic)
+    sels = _bwd_selectors(
+        n, viewmat, means3d, scales, quats, radii, conics, v_xy, v_depth, v_conic
+    )
     v_viewmat.zero_()
     if _VIEW_ACCUM_TILE:
         blocks_per_image = (n + _BWD_BLOCK - 1) // _BWD_BLOCK
         wp.launch_tiled(
             _project_bwd_view_tile_kernel,
             dim=[B * blocks_per_image],
-            inputs=[means3d, scales, quats, viewmat, radii, conics,
-                    v_xy, v_depth, v_conic, n, blocks_per_image, *sels,
-                    fx, fy, glob_scale],
+            inputs=[
+                means3d,
+                scales,
+                quats,
+                viewmat,
+                radii,
+                conics,
+                v_xy,
+                v_depth,
+                v_conic,
+                n,
+                blocks_per_image,
+                *sels,
+                fx,
+                fy,
+                glob_scale,
+            ],
             outputs=[v_viewmat],
             block_dim=_BWD_BLOCK,
             device=means3d.device,
@@ -1087,8 +1280,22 @@ def _project_bwd_view_launch(
         wp.launch(
             _project_bwd_view_atomic_kernel,
             dim=B * n,
-            inputs=[means3d, scales, quats, viewmat, radii, conics,
-                    v_xy, v_depth, v_conic, n, *sels, fx, fy, glob_scale],
+            inputs=[
+                means3d,
+                scales,
+                quats,
+                viewmat,
+                radii,
+                conics,
+                v_xy,
+                v_depth,
+                v_conic,
+                n,
+                *sels,
+                fx,
+                fy,
+                glob_scale,
+            ],
             outputs=[v_viewmat],
             device=means3d.device,
         )
@@ -1115,8 +1322,9 @@ def _project_bwd_both_launch(
 ) -> None:
     n = num_gaussians
     B = v_mean3d.shape[0] // n
-    sels = _bwd_selectors(n, viewmat, means3d, scales, quats,
-                          radii, conics, v_xy, v_depth, v_conic)
+    sels = _bwd_selectors(
+        n, viewmat, means3d, scales, quats, radii, conics, v_xy, v_depth, v_conic
+    )
     v_mean3d.zero_()
     v_scale.zero_()
     v_quat.zero_()
@@ -1125,9 +1333,23 @@ def _project_bwd_both_launch(
     wp.launch_tiled(
         _project_bwd_both_kernel,
         dim=[B * blocks_per_image],
-        inputs=[means3d, scales, quats, viewmat, radii, conics,
-                v_xy, v_depth, v_conic, n, blocks_per_image, *sels,
-                fx, fy, glob_scale],
+        inputs=[
+            means3d,
+            scales,
+            quats,
+            viewmat,
+            radii,
+            conics,
+            v_xy,
+            v_depth,
+            v_conic,
+            n,
+            blocks_per_image,
+            *sels,
+            fx,
+            fy,
+            glob_scale,
+        ],
         outputs=[v_mean3d, v_scale, v_quat, v_viewmat],
         block_dim=_BWD_BLOCK,
         device=means3d.device,
@@ -1142,31 +1364,58 @@ def _project_bwd_both_launch(
 # every kernel runs the plain single-image path.
 # graph_mode=WARP: no host readback / data-dependent shapes.
 _project_bwd_ffi = jax_callable(
-    _project_bwd_launch, num_outputs=3,
-    graph_mode=JaxCallableGraphMode.WARP, vmap_method="expand_dims",
+    _project_bwd_launch,
+    num_outputs=3,
+    graph_mode=JaxCallableGraphMode.WARP,
+    vmap_method="expand_dims",
 )
 _project_bwd_view_ffi = jax_callable(
-    _project_bwd_view_launch, num_outputs=1,
-    graph_mode=JaxCallableGraphMode.WARP, vmap_method="expand_dims",
+    _project_bwd_view_launch,
+    num_outputs=1,
+    graph_mode=JaxCallableGraphMode.WARP,
+    vmap_method="expand_dims",
 )
 _project_bwd_both_ffi = jax_callable(
-    _project_bwd_both_launch, num_outputs=4,
-    graph_mode=JaxCallableGraphMode.WARP, vmap_method="expand_dims",
+    _project_bwd_both_launch,
+    num_outputs=4,
+    graph_mode=JaxCallableGraphMode.WARP,
+    vmap_method="expand_dims",
 )
 
 
 def _project_call(
-    mean3ds: jax.Array, scales: jax.Array, quats: jax.Array, viewmat: jax.Array,
-    opac: jax.Array, n: int, has_opac: int, img_shape: tuple[int, int],
-    f: tuple[float, float], c: tuple[float, float], glob_scale: float,
-    clip_thresh: float, block_width: int,
+    mean3ds: jax.Array,
+    scales: jax.Array,
+    quats: jax.Array,
+    viewmat: jax.Array,
+    opac: jax.Array,
+    n: int,
+    has_opac: int,
+    img_shape: tuple[int, int],
+    f: tuple[float, float],
+    c: tuple[float, float],
+    glob_scale: float,
+    clip_thresh: float,
+    block_width: int,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     H, W = img_shape
     xys, depths, radii, conics, num_tiles_hit, cum_tiles_hit = _project_ffi(
-        mean3ds, scales, quats, viewmat, opac,
-        int(n), int(has_opac), int(H), int(W),
-        float(f[0]), float(f[1]), float(c[0]), float(c[1]),
-        float(glob_scale), float(clip_thresh), int(block_width),
+        mean3ds,
+        scales,
+        quats,
+        viewmat,
+        opac,
+        int(n),
+        int(has_opac),
+        int(H),
+        int(W),
+        float(f[0]),
+        float(f[1]),
+        float(c[0]),
+        float(c[1]),
+        float(glob_scale),
+        float(clip_thresh),
+        int(block_width),
         output_dims=n,
     )
     depths = depths.reshape(n, 1)
@@ -1181,16 +1430,38 @@ def _project_call(
 # custom_vjp bwd cannot see which cotangents the caller wants, so we build one
 # custom_vjp function object per diff_wrt selection and dispatch in project().
 def _project_fwd_rule(
-    mean3ds: jax.Array, scales: jax.Array, quats: jax.Array, viewmat: jax.Array,
-    opac: jax.Array, n: int, has_opac: int, img_shape: tuple[int, int],
-    f: tuple[float, float], c: tuple[float, float], glob_scale: float,
-    clip_thresh: float, block_width: int,
+    mean3ds: jax.Array,
+    scales: jax.Array,
+    quats: jax.Array,
+    viewmat: jax.Array,
+    opac: jax.Array,
+    n: int,
+    has_opac: int,
+    img_shape: tuple[int, int],
+    f: tuple[float, float],
+    c: tuple[float, float],
+    glob_scale: float,
+    clip_thresh: float,
+    block_width: int,
 ) -> tuple[
     tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
     tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
 ]:
-    out = _project_call(mean3ds, scales, quats, viewmat, opac, n, has_opac,
-                        img_shape, f, c, glob_scale, clip_thresh, block_width)
+    out = _project_call(
+        mean3ds,
+        scales,
+        quats,
+        viewmat,
+        opac,
+        n,
+        has_opac,
+        img_shape,
+        f,
+        c,
+        glob_scale,
+        clip_thresh,
+        block_width,
+    )
     _xys, _depths, radii, conics, _nth, _cum = out
     residuals = (mean3ds, scales, quats, viewmat, radii, conics)
     return out, residuals
@@ -1201,48 +1472,116 @@ def _bwd_common_inputs(
 ) -> tuple[jax.Array, ...]:
     mean3ds, scales, quats, viewmat, radii, conics = residuals
     v_xys, v_depths, _v_radii, v_conics, _v_nth, _v_cum = cotangents
-    return (mean3ds, scales, quats, viewmat,
-            radii.reshape(n).astype(jnp.int32), conics,
-            v_xys, v_depths.reshape(n), v_conics)
+    return (
+        mean3ds,
+        scales,
+        quats,
+        viewmat,
+        radii.reshape(n).astype(jnp.int32),
+        conics,
+        v_xys,
+        v_depths.reshape(n),
+        v_conics,
+    )
 
 
 def _make_diff_variant(bwd_rule: Callable) -> Callable:
     @partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12))
     def variant(
-        mean3ds: jax.Array, scales: jax.Array, quats: jax.Array, viewmat: jax.Array,
-        opac: jax.Array, n: int, has_opac: int, img_shape: tuple[int, int],
-        f: tuple[float, float], c: tuple[float, float], glob_scale: float,
-        clip_thresh: float, block_width: int,
+        mean3ds: jax.Array,
+        scales: jax.Array,
+        quats: jax.Array,
+        viewmat: jax.Array,
+        opac: jax.Array,
+        n: int,
+        has_opac: int,
+        img_shape: tuple[int, int],
+        f: tuple[float, float],
+        c: tuple[float, float],
+        glob_scale: float,
+        clip_thresh: float,
+        block_width: int,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-        return _project_call(mean3ds, scales, quats, viewmat, opac, n, has_opac,
-                             img_shape, f, c, glob_scale, clip_thresh, block_width)
+        return _project_call(
+            mean3ds,
+            scales,
+            quats,
+            viewmat,
+            opac,
+            n,
+            has_opac,
+            img_shape,
+            f,
+            c,
+            glob_scale,
+            clip_thresh,
+            block_width,
+        )
 
     variant.defvjp(_project_fwd_rule, bwd_rule)
     return variant
 
 
 def _project_diff_bwd(
-    n: int, has_opac: int, img_shape: tuple[int, int], f: tuple[float, float],
-    c: tuple[float, float], glob_scale: float, clip_thresh: float, block_width: int,
-    residuals: tuple[jax.Array, ...], cotangents: tuple[jax.Array, ...],
+    n: int,
+    has_opac: int,
+    img_shape: tuple[int, int],
+    f: tuple[float, float],
+    c: tuple[float, float],
+    glob_scale: float,
+    clip_thresh: float,
+    block_width: int,
+    residuals: tuple[jax.Array, ...],
+    cotangents: tuple[jax.Array, ...],
 ) -> tuple[jax.Array | None, ...]:
     m, s, q, vm, r, cn, vx, vd, vc = _bwd_common_inputs(residuals, cotangents, n)
     v_mean, v_scale, v_quat = _project_bwd_ffi(
-        m, s, q, vm, r, cn, vx, vd, vc,
-        int(n), float(f[0]), float(f[1]), float(glob_scale), output_dims=n,
+        m,
+        s,
+        q,
+        vm,
+        r,
+        cn,
+        vx,
+        vd,
+        vc,
+        int(n),
+        float(f[0]),
+        float(f[1]),
+        float(glob_scale),
+        output_dims=n,
     )
     return (v_mean, v_scale, v_quat, None, None)
 
 
 def _project_diff_view_bwd(
-    n: int, has_opac: int, img_shape: tuple[int, int], f: tuple[float, float],
-    c: tuple[float, float], glob_scale: float, clip_thresh: float, block_width: int,
-    residuals: tuple[jax.Array, ...], cotangents: tuple[jax.Array, ...],
+    n: int,
+    has_opac: int,
+    img_shape: tuple[int, int],
+    f: tuple[float, float],
+    c: tuple[float, float],
+    glob_scale: float,
+    clip_thresh: float,
+    block_width: int,
+    residuals: tuple[jax.Array, ...],
+    cotangents: tuple[jax.Array, ...],
 ) -> tuple[jax.Array | None, ...]:
     m, s, q, vm, r, cn, vx, vd, vc = _bwd_common_inputs(residuals, cotangents, n)
     (v_viewmat,) = _project_bwd_view_ffi(
-        m, s, q, vm, r, cn, vx, vd, vc,
-        int(n), float(f[0]), float(f[1]), float(glob_scale), output_dims=(4, 4),
+        m,
+        s,
+        q,
+        vm,
+        r,
+        cn,
+        vx,
+        vd,
+        vc,
+        int(n),
+        float(f[0]),
+        float(f[1]),
+        float(glob_scale),
+        output_dims=(4, 4),
     )
     # Only viewmat carries a gradient; gaussian inputs get None (they are constants
     # for pose-only optimization -- the whole point of the split).
@@ -1250,14 +1589,32 @@ def _project_diff_view_bwd(
 
 
 def _project_diff_both_bwd(
-    n: int, has_opac: int, img_shape: tuple[int, int], f: tuple[float, float],
-    c: tuple[float, float], glob_scale: float, clip_thresh: float, block_width: int,
-    residuals: tuple[jax.Array, ...], cotangents: tuple[jax.Array, ...],
+    n: int,
+    has_opac: int,
+    img_shape: tuple[int, int],
+    f: tuple[float, float],
+    c: tuple[float, float],
+    glob_scale: float,
+    clip_thresh: float,
+    block_width: int,
+    residuals: tuple[jax.Array, ...],
+    cotangents: tuple[jax.Array, ...],
 ) -> tuple[jax.Array | None, ...]:
     m, s, q, vm, r, cn, vx, vd, vc = _bwd_common_inputs(residuals, cotangents, n)
     v_mean, v_scale, v_quat, v_viewmat = _project_bwd_both_ffi(
-        m, s, q, vm, r, cn, vx, vd, vc,
-        int(n), float(f[0]), float(f[1]), float(glob_scale),
+        m,
+        s,
+        q,
+        vm,
+        r,
+        cn,
+        vx,
+        vd,
+        vc,
+        int(n),
+        float(f[0]),
+        float(f[1]),
+        float(glob_scale),
         output_dims={"v_mean3d": n, "v_scale": n, "v_quat": n, "v_viewmat": (4, 4)},
     )
     return (v_mean, v_scale, v_quat, v_viewmat, None)
@@ -1368,7 +1725,17 @@ def project(
         has_opac = 1
     variant = _DIFF_VARIANTS[_normalize_diff_wrt(diff_wrt)]
     return variant(
-        mean3ds, scales, quats, viewmat, opac,
-        int(n), int(has_opac), img_shape, f, c,
-        float(glob_scale), float(clip_thresh), int(block_width),
+        mean3ds,
+        scales,
+        quats,
+        viewmat,
+        opac,
+        int(n),
+        int(has_opac),
+        img_shape,
+        f,
+        c,
+        float(glob_scale),
+        float(clip_thresh),
+        int(block_width),
     )

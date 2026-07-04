@@ -284,8 +284,16 @@ def test_packed_vs_64bit_random() -> None:
     """
     scene = _random_scene(100_000, 512, 512, seed=7)
     kw: _RastKW = {"img_shape": scene["img_shape"], "block_width": scene["block_width"]}
-    args = (scene["colors"], scene["opacities"], scene["background"], scene["xys"],
-            scene["depths"], scene["radii"], scene["conics"], scene["cum_tiles_hit"])
+    args = (
+        scene["colors"],
+        scene["opacities"],
+        scene["background"],
+        scene["xys"],
+        scene["depths"],
+        scene["radii"],
+        scene["conics"],
+        scene["cum_tiles_hit"],
+    )
     packed, legacy = _rasterize_both_keymodes(args, kw)
     d = np.abs(packed - legacy)
     mse = float(np.mean((packed - legacy) ** 2))
@@ -298,12 +306,24 @@ def test_packed_vs_64bit_lego() -> None:
     """Packed vs 64-bit on the real lego scene (tight O6 key emission)."""
     means, scales, quats, colors, opac = splax.load_ply(ROOT / "data/scenes/lego.ply")
     H, W = 720, 1280
-    viewmat = jnp.asarray(np.array(
-        [[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 6.0], [0, 0, 0, 1]], np.float32))
+    viewmat = jnp.asarray(
+        np.array(
+            [[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 6.0], [0, 0, 0, 1]], np.float32
+        )
+    )
     xys, depths, radii, conics, _nth, cum = splax.project(
-        means, scales, quats, viewmat, opacities=opac, img_shape=(H, W),
-        f=(float(H), float(H)), c=(W // 2, H // 2),
-        glob_scale=1.0, clip_thresh=0.01, block_width=16)
+        means,
+        scales,
+        quats,
+        viewmat,
+        opacities=opac,
+        img_shape=(H, W),
+        f=(float(H), float(H)),
+        c=(W // 2, H // 2),
+        glob_scale=1.0,
+        clip_thresh=0.01,
+        block_width=16,
+    )
     kw: _RastKW = {"img_shape": (H, W), "block_width": 16, "tight": True}
     args = (colors, opac, jnp.ones(3), xys, depths, radii, conics, cum)
     packed, legacy = _rasterize_both_keymodes(args, kw)
@@ -349,7 +369,8 @@ def test_packed_fallback_triggers_when_bits_dont_fit() -> None:
     splax.clear_scratch()
     views = jnp.stack([_id_viewmat(dz=5.0 + 0.1 * i) for i in range(8)])
     jax.jit(jax.vmap(lambda vm: splax.render(m, s, q, c, o, viewmat=vm, **kw)[0]))(
-        views).block_until_ready()
+        views
+    ).block_until_ready()
     assert _rast._scratch_cache[dev]["isect_dtype"] == wp.int64
     splax.clear_scratch()
 
@@ -359,7 +380,9 @@ def _norm_quats(q: jax.Array) -> jax.Array:
 
 
 def _id_viewmat(dz: float = 5.0) -> jax.Array:
-    return jnp.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, dz], [0, 0, 0, 1]], jnp.float32)
+    return jnp.array(
+        [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, dz], [0, 0, 0, 1]], jnp.float32
+    )
 
 
 def _nerf_camera(frame: dict[str, object]) -> np.ndarray:
@@ -408,7 +431,16 @@ def test_render_lego_vs_gsplat(gsplat_ref: types.ModuleType) -> None:
 
 def _project_tight(
     n: int, H: int, W: int, seed: int
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple[int, int]]:
+) -> tuple[
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    tuple[int, int],
+]:
     """splax.project WITH opacities -> SNUGBOX radii + AccuTile num_tiles_hit."""
     key = jax.random.key(seed)
     k = jax.random.split(key, 5)

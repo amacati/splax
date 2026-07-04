@@ -28,7 +28,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import splax
 from splax.distillation import (
-    sample_poses, render_views, distill, _cam_centers, _opacity_bbox,
+    sample_poses,
+    render_views,
+    distill,
+    _cam_centers,
+    _opacity_bbox,
 )
 
 
@@ -40,8 +44,13 @@ def _random_teacher(n: int, seed: int = 0) -> dict[str, np.ndarray]:
     quats /= np.linalg.norm(quats, axis=1, keepdims=True)
     colors = rng.uniform(0.1, 0.9, size=(n, 3)).astype(np.float32)
     opac = rng.uniform(0.2, 0.95, size=(n, 1)).astype(np.float32)
-    return {"means": means, "scales": scales, "quats": quats,
-            "colors": colors, "opacities": opac}
+    return {
+        "means": means,
+        "scales": scales,
+        "quats": quats,
+        "colors": colors,
+        "opacities": opac,
+    }
 
 
 def test_poses_inside_bbox_and_proper_rotation() -> None:
@@ -90,11 +99,14 @@ def test_trajectory_bias_moves_cameras() -> None:
     """Passing viewmats biases a fraction of the eyes toward the trajectory centers."""
     t = _random_teacher(2000, seed=5)
     # a trajectory sitting well outside the cloud bbox
-    traj_centers = np.array([[3.0, 0, 0], [3.1, 0.2, 0.1], [2.9, -0.1, 0.05]], np.float32)
+    traj_centers = np.array(
+        [[3.0, 0, 0], [3.1, 0.2, 0.1], [2.9, -0.1, 0.05]], np.float32
+    )
     traj = np.broadcast_to(np.eye(4, dtype=np.float32), (3, 4, 4)).copy()
     traj[:, :3, 3] = -traj_centers  # R = I -> center = -t
-    vms = sample_poses(t["means"], t["opacities"], 300, seed=6, viewmats=traj,
-                       traj_frac=0.5)
+    vms = sample_poses(
+        t["means"], t["opacities"], 300, seed=6, viewmats=traj, traj_frac=0.5
+    )
     centers = _cam_centers(vms)
     # ~half the eyes should be pulled toward x~3 (far outside the unit-ish cloud)
     near_traj = (centers[:, 0] > 1.5).mean()
@@ -109,8 +121,8 @@ def test_render_views_shapes_and_depth() -> None:
     assert imgs.shape == (5, H, W, 3) and imgs.dtype == np.uint8
     imgs2, depth = render_views(t, vms, (H, W), f=(48.0, 48.0), c=(32, 24), depth=True)
     assert depth.shape == (5, H, W) and depth.dtype == np.float16
-    assert np.array_equal(imgs2, imgs)          # image identical with/without depth
-    assert float(depth.max()) > 0.0             # something rendered
+    assert np.array_equal(imgs2, imgs)  # image identical with/without depth
+    assert float(depth.max()) > 0.0  # something rendered
 
 
 @pytest.mark.parametrize("init", ["prune", "random"])
@@ -126,9 +138,20 @@ def test_distill_smoke(init: str) -> None:
         return len(curve) + 0.0  # monotone stand-in so the hook path is exercised
 
     student = distill(
-        teacher, n_student=400, img_shape=(40, 48), f=(40.0, 40.0), c=(24, 20),
-        n_views=12, steps=40, depth_lambda=0.1, init=init, seed=1, log_every=20,
-        relocate_every=20, refine_start=5, info=info,
+        teacher,
+        n_student=400,
+        img_shape=(40, 48),
+        f=(40.0, 40.0),
+        c=(24, 20),
+        n_views=12,
+        steps=40,
+        depth_lambda=0.1,
+        init=init,
+        seed=1,
+        log_every=20,
+        relocate_every=20,
+        refine_start=5,
+        info=info,
     )
     for k in ("means", "scales", "quats", "colors", "opacities"):
         assert k in student
@@ -138,10 +161,18 @@ def test_distill_smoke(init: str) -> None:
 
     # the student renders a finite image
     img = splax.inference.render(
-        student["means"], student["scales"], student["quats"],
-        student["colors"], student["opacities"],
-        viewmat=jnp.eye(4), background=jnp.ones(3), img_shape=(40, 48),
-        f=(40.0, 40.0), c=(24, 20), glob_scale=1.0, clip_thresh=0.01,
+        student["means"],
+        student["scales"],
+        student["quats"],
+        student["colors"],
+        student["opacities"],
+        viewmat=jnp.eye(4),
+        background=jnp.ones(3),
+        img_shape=(40, 48),
+        f=(40.0, 40.0),
+        c=(24, 20),
+        glob_scale=1.0,
+        clip_thresh=0.01,
     )
     assert np.all(np.isfinite(np.asarray(img)))
 

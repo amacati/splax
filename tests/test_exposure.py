@@ -30,7 +30,8 @@ ROOT = Path(__file__).resolve().parent.parent
 def _load_module() -> types.ModuleType:
     sys.path.insert(0, str(ROOT / "scripts"))
     spec = importlib.util.spec_from_file_location(
-        "train_colmap", ROOT / "scripts" / "train_colmap.py")
+        "train_colmap", ROOT / "scripts" / "train_colmap.py"
+    )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

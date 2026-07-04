@@ -54,20 +54,27 @@ def _params(n: int = 200, seed: int = 0) -> dict[str, jax.Array]:
 def _view(seed: int) -> tuple[jax.Array, jax.Array]:
     k = jax.random.split(jax.random.key(100 + seed), 2)
     gt = jax.random.uniform(k[0], (H, W, 3))
-    vm = jnp.array([[1, 0, 0, 0.1 * seed], [0, 1, 0, -0.05 * seed],
-                    [0, 0, 1, 4.0], [0, 0, 0, 1]], jnp.float32)
+    vm = jnp.array(
+        [[1, 0, 0, 0.1 * seed], [0, 1, 0, -0.05 * seed], [0, 0, 1, 4.0], [0, 0, 0, 1]],
+        jnp.float32,
+    )
     return gt, vm
 
 
 def _sgd_opt(params: dict[str, jax.Array]) -> optax.GradientTransformation:
     # lr=1 SGD so apply_updates(p) = p - grad  =>  grad = p - step(p)  (linear recovery).
-    txs: dict[Hashable, optax.GradientTransformation] = {kk: optax.sgd(1.0) for kk in params}
+    txs: dict[Hashable, optax.GradientTransformation] = {
+        kk: optax.sgd(1.0) for kk in params
+    }
     return optax.multi_transform(txs, {kk: kk for kk in params})
 
 
 def _dummy_pts(B: int) -> tuple[jax.Array, jax.Array, jax.Array]:
-    return (jnp.zeros((B, 1, 2), jnp.float32), jnp.zeros((B, 1), jnp.float32),
-            jnp.zeros((B, 1), jnp.float32))
+    return (
+        jnp.zeros((B, 1, 2), jnp.float32),
+        jnp.zeros((B, 1), jnp.float32),
+        jnp.zeros((B, 1), jnp.float32),
+    )
 
 
 def _recover_grad(
@@ -87,7 +94,9 @@ def test_b1_matches_pre_t6_single_view() -> None:
     params = _params(seed=1)
     gt, vm = _view(3)
 
-    def old_loss(p: dict[str, jax.Array]) -> jax.Array:  # exact pre-T6 single-view loss_fn (train_colmap, before batching)
+    def old_loss(
+        p: dict[str, jax.Array],
+    ) -> jax.Array:  # exact pre-T6 single-view loss_fn (train_colmap, before batching)
         img, _ = tc.render_params(p, vm, H, W, INTR, background=jnp.ones(3))
         l1 = jnp.mean(jnp.abs(img - gt))
         dssim = 1.0 - dm_pix.ssim(img, gt)
@@ -100,7 +109,8 @@ def test_b1_matches_pre_t6_single_view() -> None:
     g_b1 = _recover_grad(params, 1, gt[None], vm[None])
     for kk in params:
         assert np.allclose(np.asarray(g_ref[kk]), g_b1[kk], rtol=1e-4, atol=1e-6), (
-            f"{kk}: B=1 grad differs from pre-T6 single-view grad")
+            f"{kk}: B=1 grad differs from pre-T6 single-view grad"
+        )
 
 
 def test_b2_grad_equals_mean_of_b1_grads() -> None:
@@ -116,7 +126,8 @@ def test_b2_grad_equals_mean_of_b1_grads() -> None:
         mean_g = 0.5 * (g0[kk] + g1[kk])
         assert np.allclose(gb[kk], mean_g, rtol=2e-3, atol=1e-5), (
             f"{kk}: batched grad != mean of per-view grads "
-            f"(max dev {np.abs(gb[kk] - mean_g).max():.2e})")
+            f"(max dev {np.abs(gb[kk] - mean_g).max():.2e})"
+        )
 
 
 def test_b2_duplicate_view_equals_b1() -> None:
@@ -138,8 +149,9 @@ def test_batched_step_runs_under_jit_with_exposure_and_depth() -> None:
     exp_tx = optax.sgd(1.0)
     exp_p = tc.init_exposure(8)
     exp_state = exp_tx.init(exp_p)
-    step = tc._make_step(opt, H, W, INTR, SSIM_L, OREG, SREG,
-                         depth_loss=True, exp_tx=exp_tx, batch=B)
+    step = tc._make_step(
+        opt, H, W, INTR, SSIM_L, OREG, SREG, depth_loss=True, exp_tx=exp_tx, batch=B
+    )
     gts = jax.random.uniform(jax.random.key(7), (B, H, W, 3))
     vms = jnp.broadcast_to(jnp.eye(4).at[2, 3].set(4.0), (B, 4, 4))
     bg = jnp.broadcast_to(jnp.ones(3), (B, 3))
@@ -147,8 +159,9 @@ def test_batched_step_runs_under_jit_with_exposure_and_depth() -> None:
     uv = jax.random.uniform(jax.random.key(8), (B, 4, 2)) * 40 + 4
     depth = jnp.full((B, 4), 4.0)
     mask = jnp.ones((B, 4))
-    new_p, _os, new_exp, _es, l1 = step(params, opt_state, exp_p, exp_state,
-                                        gts, vms, bg, vi, uv, depth, mask)
+    new_p, _os, new_exp, _es, l1 = step(
+        params, opt_state, exp_p, exp_state, gts, vms, bg, vi, uv, depth, mask
+    )
     assert np.isfinite(float(l1))
     # only the touched exposure rows (0,3,5) moved; the rest stayed identity.
     moved = np.abs(np.asarray(new_exp - exp_p)).sum((1, 2)) > 0

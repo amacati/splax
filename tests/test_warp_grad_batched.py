@@ -51,9 +51,9 @@ import splax
 B = 3
 
 
-def _scene(n: int, H: int, W: int, seed: int = 0) -> tuple[
-    jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array
-]:
+def _scene(
+    n: int, H: int, W: int, seed: int = 0
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     key = jax.random.key(seed)
     k = jax.random.split(key, 6)
     means = jax.random.normal(k[0], (n, 3)) * 0.5
@@ -116,7 +116,9 @@ def _rel(a: jax.Array | np.ndarray, b: jax.Array | np.ndarray) -> float:
     return np.linalg.norm(a - b) / (np.linalg.norm(b) + 1e-12)
 
 
-def _assert_close(name: str, gv: jax.Array | np.ndarray, gs: jax.Array | np.ndarray) -> None:
+def _assert_close(
+    name: str, gv: jax.Array | np.ndarray, gs: jax.Array | np.ndarray
+) -> None:
     gv, gs = np.asarray(gv), np.asarray(gs)
     assert gv.shape == gs.shape, f"{name}: shape {gv.shape} vs {gs.shape}"
     assert np.all(np.isfinite(gv)), f"{name}: non-finite vmap grad"
@@ -142,7 +144,9 @@ def test_batched_gaussians_per_image(diff: tuple[str, ...]) -> None:
     bmeans = means + 0.02 * jax.random.normal(jax.random.key(4), (B, n, 3))
 
     def loss(m_i: jax.Array, v_i: jax.Array, i: jax.Array | int) -> jax.Array:
-        return jnp.mean(w[i] * _render(m_i, scales, quats, colors, opac, v_i, bg, H, W, diff))
+        return jnp.mean(
+            w[i] * _render(m_i, scales, quats, colors, opac, v_i, bg, H, W, diff)
+        )
 
     gv = jax.vmap(jax.grad(loss), in_axes=(0, 0, 0))(bmeans, vms, jnp.arange(B))
     gs = jnp.stack([jax.grad(loss)(bmeans[i], vms[i], i) for i in range(B)])
@@ -165,18 +169,32 @@ def test_broadcast_param_summed(diff: tuple[str, ...], param: str) -> None:
         kw[param] = p
         return jnp.mean(
             w[i]
-            * _render(kw["means"], kw["scales"], kw["quats"], kw["colors"], kw["opac"],
-                      v_i, bg, H, W, diff)
+            * _render(
+                kw["means"],
+                kw["scales"],
+                kw["quats"],
+                kw["colors"],
+                kw["opac"],
+                v_i,
+                bg,
+                H,
+                W,
+                diff,
+            )
         )
 
-    gper = jax.vmap(jax.grad(loss), in_axes=(None, 0, 0))(base[param], vms, jnp.arange(B))
+    gper = jax.vmap(jax.grad(loss), in_axes=(None, 0, 0))(
+        base[param], vms, jnp.arange(B)
+    )
     gsummed = jnp.sum(gper, axis=0)
 
     def total(p: jax.Array) -> jax.Array:
         # sum() is typed with a Literal[0] start; the runtime value is always an Array.
         return cast(jax.Array, sum(loss(p, vms[i], i) for i in range(B)))
 
-    _assert_close(f"{diff} {param}(broadcast summed)", gsummed, jax.grad(total)(base[param]))
+    _assert_close(
+        f"{diff} {param}(broadcast summed)", gsummed, jax.grad(total)(base[param])
+    )
 
 
 @pytest.mark.parametrize("diff", [("viewmat",), ("gaussians", "viewmat")])
@@ -190,12 +208,16 @@ def test_batched_viewmat_per_pose(diff: tuple[str, ...]) -> None:
     w = jax.random.uniform(jax.random.key(13), (B, H, W, 3))
 
     def loss(v_i: jax.Array, i: jax.Array | int) -> jax.Array:
-        return jnp.mean(w[i] * _render(means, scales, quats, colors, opac, v_i, bg, H, W, diff))
+        return jnp.mean(
+            w[i] * _render(means, scales, quats, colors, opac, v_i, bg, H, W, diff)
+        )
 
     gv = jax.vmap(jax.grad(loss), in_axes=(0, 0))(vms, jnp.arange(B))
     gs = jnp.stack([jax.grad(loss)(vms[i], i) for i in range(B)])
     _assert_close(f"{diff} viewmat(batched)", gv, gs)
-    assert np.allclose(np.asarray(gv)[:, 3, :], 0.0), "viewmat bottom row must be constant"
+    assert np.allclose(np.asarray(gv)[:, 3, :], 0.0), (
+        "viewmat bottom row must be constant"
+    )
 
 
 # --- Degenerate broadcast-geometry: shared render, batched target -------------
@@ -217,8 +239,18 @@ def test_broadcast_geometry_shared_render(param: str) -> None:
         kw[param] = p
         return jnp.mean(
             w[i]
-            * _render(kw["means"], kw["scales"], kw["quats"], kw["colors"], kw["opac"],
-                      vm, bg, H, W, ("gaussians",))
+            * _render(
+                kw["means"],
+                kw["scales"],
+                kw["quats"],
+                kw["colors"],
+                kw["opac"],
+                vm,
+                bg,
+                H,
+                W,
+                ("gaussians",),
+            )
         )
 
     gv = jax.vmap(jax.grad(loss), in_axes=(None, 0))(base[param], jnp.arange(B))
@@ -240,7 +272,10 @@ def test_batched_viewmat_finite_difference() -> None:
     w = jax.random.uniform(jax.random.key(23), (B, H, W, 3))
 
     def loss(v_i: jax.Array, i: jax.Array | int) -> jax.Array:
-        return jnp.mean(w[i] * _render(means, scales, quats, colors, opac, v_i, bg, H, W, ("viewmat",)))
+        return jnp.mean(
+            w[i]
+            * _render(means, scales, quats, colors, opac, v_i, bg, H, W, ("viewmat",))
+        )
 
     g = np.asarray(jax.vmap(jax.grad(loss), in_axes=(0, 0))(vms, jnp.arange(B)))[0]
     assert np.all(np.isfinite(g))
@@ -252,4 +287,6 @@ def test_batched_viewmat_finite_difference() -> None:
     minus = float(loss(vms[0] - jnp.asarray(d * eps), 0))
     numeric = (plus - minus) / (2 * eps)
     rel = abs(analytic - numeric) / (abs(numeric) + 1e-12)
-    assert rel < 8e-2, f"batched viewmat FD mismatch: {analytic:.3e} vs {numeric:.3e} (rel {rel:.2e})"
+    assert rel < 8e-2, (
+        f"batched viewmat FD mismatch: {analytic:.3e} vs {numeric:.3e} (rel {rel:.2e})"
+    )

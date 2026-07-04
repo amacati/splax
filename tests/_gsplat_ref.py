@@ -64,11 +64,15 @@ def _probe() -> tuple[bool, str]:
             return _PROBE
         try:
             project(
-                jnp.zeros((1, 3)), jnp.ones((1, 3)) * 0.05,
+                jnp.zeros((1, 3)),
+                jnp.ones((1, 3)) * 0.05,
                 jnp.array([[1.0, 0.0, 0.0, 0.0]]),
                 jnp.eye(4).at[2, 3].set(5.0),
-                img_shape=(16, 16), f=(16.0, 16.0), c=(8, 8),
-                glob_scale=1.0, clip_thresh=0.01,
+                img_shape=(16, 16),
+                f=(16.0, 16.0),
+                c=(8, 8),
+                glob_scale=1.0,
+                clip_thresh=0.01,
             )
             _PROBE = (True, "")
         except Exception as e:  # noqa: BLE001 - any failure means "unavailable"
@@ -128,13 +132,22 @@ def project(
     """
     H, W = img_shape
     radii, means2d, depths, conics, _comp = gsplat.fully_fused_projection(
-        _ft(means), None, _ft(quats), _ft(scales) * float(glob_scale),
-        _ft(viewmat)[None], _ft(_K(f, c))[None], W, H,
-        eps2d=0.3, near_plane=float(clip_thresh), packed=False,
+        _ft(means),
+        None,
+        _ft(quats),
+        _ft(scales) * float(glob_scale),
+        _ft(viewmat)[None],
+        _ft(_K(f, c))[None],
+        W,
+        H,
+        eps2d=0.3,
+        near_plane=float(clip_thresh),
+        packed=False,
         calc_compensations=False,
     )
     radii_n, means2d_n, depths_n, conics_n = (
-        x[0].detach().cpu().numpy() for x in (radii, means2d, depths, conics))
+        x[0].detach().cpu().numpy() for x in (radii, means2d, depths, conics)
+    )
     return radii_n, means2d_n, depths_n, conics_n
 
 
@@ -156,10 +169,18 @@ def render(
     """gsplat ``rasterization`` in splax.render's terms. Returns numpy (H, W, 3)."""
     H, W = img_shape
     out, alpha, _meta = gsplat.rasterization(
-        _ft(means), _ft(quats), _ft(scales) * float(glob_scale),
-        _ft(opacities).reshape(-1), _ft(colors),
-        _ft(viewmat)[None], _ft(_K(f, c))[None], W, H,
-        near_plane=float(clip_thresh), eps2d=0.3, render_mode="RGB",
+        _ft(means),
+        _ft(quats),
+        _ft(scales) * float(glob_scale),
+        _ft(opacities).reshape(-1),
+        _ft(colors),
+        _ft(viewmat)[None],
+        _ft(_K(f, c))[None],
+        W,
+        H,
+        near_plane=float(clip_thresh),
+        eps2d=0.3,
+        render_mode="RGB",
     )
     # gsplat returns colors composited over black plus the accumulated alpha; put it
     # on the requested background exactly as splax.render does (composite over bg).
@@ -199,9 +220,18 @@ def grad(
     opac_t = _ft(opacities).reshape(-1).requires_grad_(True)
 
     out, alpha, _meta = gsplat.rasterization(
-        means_t, quats_t, scales_t * float(glob_scale), opac_t, colors_t,
-        _ft(viewmat)[None], _ft(_K(f, c))[None], W, H,
-        near_plane=float(clip_thresh), eps2d=0.3, render_mode="RGB",
+        means_t,
+        quats_t,
+        scales_t * float(glob_scale),
+        opac_t,
+        colors_t,
+        _ft(viewmat)[None],
+        _ft(_K(f, c))[None],
+        W,
+        H,
+        near_plane=float(clip_thresh),
+        eps2d=0.3,
+        render_mode="RGB",
     )
     img = out[0] + (1.0 - alpha[0]) * _ft(background).reshape(3)
     loss = img.sum() if weight is None else (_ft(weight) * img**2).mean()

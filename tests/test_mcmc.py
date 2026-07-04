@@ -22,8 +22,13 @@ def _cuda_relocation_reference(
     opacities: np.ndarray, scales: np.ndarray, ratios: np.ndarray, n_max: int
 ) -> tuple[np.ndarray, np.ndarray]:
     """Direct transcription of the CUDA relocation_kernel double loop (Eq. 9)."""
-    binoms = np.array([[math.comb(n, k) if k <= n else 0 for k in range(n_max)]
-                       for n in range(n_max)], np.float64)
+    binoms = np.array(
+        [
+            [math.comb(n, k) if k <= n else 0 for k in range(n_max)]
+            for n in range(n_max)
+        ],
+        np.float64,
+    )
     new_opac = np.empty_like(opacities)
     new_scales = np.empty_like(scales)
     for idx in range(len(opacities)):
@@ -33,7 +38,9 @@ def _cuda_relocation_reference(
         denom = 0.0
         for i in range(1, n + 1):
             for k in range(0, i):
-                denom += binoms[i - 1, k] * ((-1.0) ** k / math.sqrt(k + 1)) * no ** (k + 1)
+                denom += (
+                    binoms[i - 1, k] * ((-1.0) ** k / math.sqrt(k + 1)) * no ** (k + 1)
+                )
         new_scales[idx] = (opacities[idx] / denom) * scales[idx]
     return new_opac, new_scales
 
@@ -48,8 +55,11 @@ def test_compute_relocation_matches_cuda_kernel() -> None:
     ref_o, ref_s = _cuda_relocation_reference(opac, scales, ratios, n_max=51)
     binoms = mcmc.make_binoms(51)
     got_o, got_s = mcmc.compute_relocation(
-        jnp.asarray(opac, jnp.float32), jnp.asarray(scales, jnp.float32),
-        jnp.asarray(ratios, jnp.float32), binoms)
+        jnp.asarray(opac, jnp.float32),
+        jnp.asarray(scales, jnp.float32),
+        jnp.asarray(ratios, jnp.float32),
+        binoms,
+    )
 
     np.testing.assert_allclose(np.asarray(got_o), ref_o, rtol=2e-4, atol=1e-5)
     np.testing.assert_allclose(np.asarray(got_s), ref_s, rtol=2e-3, atol=1e-5)
@@ -58,7 +68,9 @@ def test_compute_relocation_matches_cuda_kernel() -> None:
 def test_compute_relocation_ratio_one_is_identity() -> None:
     """ratio == 1 must pass opacity/scale through unchanged (untouched gaussians)."""
     opac = jnp.array([0.1, 0.5, 0.9], jnp.float32)
-    scales = jnp.array([[0.1, 0.2, 0.3], [0.4, 0.4, 0.4], [0.05, 0.1, 0.2]], jnp.float32)
+    scales = jnp.array(
+        [[0.1, 0.2, 0.3], [0.4, 0.4, 0.4], [0.05, 0.1, 0.2]], jnp.float32
+    )
     ratios = jnp.ones(3, jnp.float32)
     o, s = mcmc.compute_relocation(opac, scales, ratios, mcmc.make_binoms(51))
     np.testing.assert_allclose(np.asarray(o), np.asarray(opac), rtol=1e-5)
@@ -76,8 +88,16 @@ def test_relocate_teleports_dead_onto_alive() -> None:
     opac_logit = jnp.concatenate([jnp.full((100, 1), -20.0), jnp.full((400, 1), 0.85)])
 
     binoms = mcmc.make_binoms(51)
-    out, reset = mcmc.relocate(k[3], means, log_scales, quats, colors_logit,
-                               opac_logit, binoms, min_opacity=0.005)
+    out, reset = mcmc.relocate(
+        k[3],
+        means,
+        log_scales,
+        quats,
+        colors_logit,
+        opac_logit,
+        binoms,
+        min_opacity=0.005,
+    )
 
     # shapes are static
     assert out["means"].shape == (n, 3)
