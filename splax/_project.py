@@ -53,12 +53,17 @@ def _project_kernel(
     quats: wp.array[wp.vec4],
     viewmat: wp.array2d[wp.float32],
     opacities: wp.array[wp.float32],
+    gaussian_transforms: wp.array3d[wp.float32],
+    transform_ids: wp.array[wp.int32],
     num_gaussians: wp.int32,
+    num_transforms: wp.int32,
+    has_transforms: wp.int32,
     sel_means: wp.int32,
     sel_scales: wp.int32,
     sel_quats: wp.int32,
     sel_view: wp.int32,
     sel_opac: wp.int32,
+    sel_transforms: wp.int32,
     img_h: wp.int32,
     img_w: wp.int32,
     fx: wp.float32,
@@ -96,6 +101,39 @@ def _project_kernel(
     conics[idx] = wp.vec3(0.0, 0.0, 0.0)
 
     mean = means3d[m_idx]
+
+    # Optional rigid transforms tied to gaussians. transform_ids maps each
+    # gaussian to the transform it follows, -1 leaves it static. The transform
+    # stack is either broadcast (K, 4, 4) or batched (B*K, 4, 4), selected like
+    # the viewmat, so a batched render moves the same gaussians differently in
+    # every batch element. The mean moves in world space here, the covariance
+    # follows via M below. With has_transforms == 0 nothing in this block
+    # executes and the kernel matches the plain path exactly.
+    R_tf = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    moved = wp.int32(0)
+    if has_transforms != 0:
+        tf_id = transform_ids[gid]
+        if tf_id >= 0:
+            tf_idx = wp.where(sel_transforms != 0, bid * num_transforms + tf_id, tf_id)
+            R_tf = wp.mat33(
+                gaussian_transforms[tf_idx, 0, 0],
+                gaussian_transforms[tf_idx, 0, 1],
+                gaussian_transforms[tf_idx, 0, 2],
+                gaussian_transforms[tf_idx, 1, 0],
+                gaussian_transforms[tf_idx, 1, 1],
+                gaussian_transforms[tf_idx, 1, 2],
+                gaussian_transforms[tf_idx, 2, 0],
+                gaussian_transforms[tf_idx, 2, 1],
+                gaussian_transforms[tf_idx, 2, 2],
+            )
+            t_tf = wp.vec3(
+                gaussian_transforms[tf_idx, 0, 3],
+                gaussian_transforms[tf_idx, 1, 3],
+                gaussian_transforms[tf_idx, 2, 3],
+            )
+            mean = R_tf * mean + t_tf
+            moved = wp.int32(1)
+
     mx = mean[0]
     my = mean[1]
     mz = mean[2]
@@ -139,6 +177,9 @@ def _project_kernel(
         R[2, 1] * sy,
         R[2, 2] * sz,
     )
+    if moved != 0:
+        # rotate the covariance factor, V3 becomes R_tf V3 R_tf^T
+        M = R_tf * M
     V3 = M * wp.transpose(M)
 
     # EWA projection of the covariance
@@ -234,7 +275,11 @@ def _project_launch(
     quats: wp.array[wp.vec4],
     viewmat: wp.array2d[wp.float32],
     opacities: wp.array[wp.float32],
+    gaussian_transforms: wp.array3d[wp.float32],
+    transform_ids: wp.array[wp.int32],
     num_gaussians: int,
+    num_transforms: int,
+    has_transforms: int,
     img_h: int,
     img_w: int,
     fx: float,
@@ -262,6 +307,7 @@ def _project_launch(
     sel_quats = 1 if quats.shape[0] > n else 0
     sel_view = 1 if viewmat.shape[0] > 4 else 0
     sel_opac = 1 if opacities.shape[0] > n else 0
+    sel_transforms = 1 if gaussian_transforms.shape[0] > num_transforms else 0
     wp.launch(
         _project_kernel,
         dim=total,
@@ -271,12 +317,17 @@ def _project_launch(
             quats,
             viewmat,
             opacities,
+            gaussian_transforms,
+            transform_ids,
             n,
+            num_transforms,
+            has_transforms,
             sel_means,
             sel_scales,
             sel_quats,
             sel_view,
             sel_opac,
+            sel_transforms,
             img_h,
             img_w,
             fx,
@@ -1020,15 +1071,34 @@ def _project_call(
     c: tuple[float, float],
     glob_scale: float,
     clip_thresh: float,
+    gaussian_transforms: jax.Array | None = None,
+    transform_ids: jax.Array | None = None,
 ) -> _ProjOut:
+    # gaussian_transforms and transform_ids enable the rigid transforms of the
+    # grad-free inference path. The differentiable path never passes them, its
+    # backward recomputes geometry from the untransformed residuals. Without
+    # transforms the kernel takes dummy operands and skips the transform block.
     H, W = img_shape
+    if gaussian_transforms is None:
+        gaussian_transforms = jnp.zeros((1, 4, 4), jnp.float32)
+        transform_ids = jnp.full((1,), -1, jnp.int32)
+        num_transforms = 1
+        has_transforms = 0
+    else:
+        assert transform_ids is not None  # built alongside the transforms
+        num_transforms = gaussian_transforms.shape[-3]
+        has_transforms = 1
     xys, depths, radii, conics, num_tiles_hit, cum_tiles_hit = _project_ffi(
         mean3ds,
         scales,
         quats,
         viewmat,
         opac,
+        gaussian_transforms,
+        transform_ids,
         int(n),
+        int(num_transforms),
+        int(has_transforms),
         int(H),
         int(W),
         float(f[0]),

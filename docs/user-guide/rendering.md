@@ -50,6 +50,43 @@ screen-space dilation. The tile intersection still counts with the raw opacity.
 Default `False` is byte-identical to the plain path. Use the same setting at
 inference that a model was trained with.
 
+## Dynamic scene composition
+
+Composed scenes can move whole sections of gaussians with rigid transforms, for
+example a drone splat concatenated onto a room splat. `gaussian_transforms` is a
+`(K, 4, 4)` stack of world-space transforms and `gaussian_slices` the `K`
+matching non-overlapping `(start, stop)` index ranges. The gaussians in slice `k`
+move by `gaussian_transforms[k]` and everything outside the slices stays static.
+The transform is applied on the fly inside the projection kernel, so the splat
+is never copied.
+
+```python
+img = splax.inference.render(
+    means, scales, quats, colors, opacities,
+    viewmat=viewmat, background=jnp.ones(3),
+    img_shape=(H, W), f=(fx, fy), c=(W // 2, H // 2),
+    gaussian_transforms=poses,             # (K, 4, 4)
+    gaussian_slices=((100, 1000), (1000, 1500)),
+)
+```
+
+Batched dynamics work through `jax.vmap` over the transform stack. Every batch
+element renders the same shared splat with its objects at different poses, and
+one launch covers the whole batch.
+
+```python
+render_at = lambda poses: splax.inference.render(
+    means, scales, quats, colors, opacities,
+    viewmat=viewmat, background=jnp.ones(3),
+    img_shape=(H, W), f=(fx, fy), c=(W // 2, H // 2),
+    gaussian_transforms=poses, gaussian_slices=slices,
+)
+imgs = jax.vmap(render_at)(pose_batch)  # (B, K, 4, 4) -> (B, H, W, 3)
+```
+
+Omitting the arguments is the plain path with identical output and performance.
+The slices are static Python values, so changing them retraces a jitted render.
+
 ## Low-level primitives
 
 `splax.inference.render` composes two `jax.custom_vjp` primitives that are also
