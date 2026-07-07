@@ -11,3 +11,4 @@ results/*.ply
 dev
 reports/
 results/
+.pixi-src/

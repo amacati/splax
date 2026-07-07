@@ -152,24 +152,63 @@ docs-build = { cmd = "properdocs build --strict", description = "Build the docum
 docs-serve = { cmd = "properdocs serve --livereload", description = "Serve the documentation locally" }
 
 # COLMAP feature: SfM preprocessing tools in a dedicated environment.
+#
+# The CasPAR GPU bundle adjustment backend is experimental in colmap 4.1 and disabled in every
+# official binary. The only way to get it is to compile colmap with -DCASPAR_ENABLED=ON. This
+# environment therefore carries the build toolchain and colmap's host dependencies, and the
+# colmap-build task compiles colmap 4.1.0 from source into the environment prefix. The pipeline
+# tasks depend on colmap-build, which exits immediately while the binary exists and rebuilds
+# automatically when the environment was recreated. To force a rebuild, delete 
+# .pixi/envs/colmap/bin/colmap.
 [tool.pixi.feature.colmap.dependencies]
 python = ">=3.12"
-# The cuda build ships the CasPAR GPU bundle adjustment solver.
-colmap = { version = "4.1.*", build = "cuda*" }
-# colmap 4.1.0 conda-forge builds link libfaiss and libOpenImageIO but don't declare them as
-# dependencies. Remove once the recipe is fixed upstream.
+# Build toolchain
+c-compiler = "*"
+cxx-compiler = "*"
+cuda-nvcc = "12.9.*"
+cuda-cudart-dev = "12.9.*"
+cuda-version = "12.9.*"
+libcurand-dev = "*"
+cmake = "*"
+ninja = "*"
+pkg-config = "*"
+git = "*"
+# colmap host dependencies
+libgl-devel = "*"
+libopengl-devel = "*"
+libglu = "*"
+glew = "*"
+libblas = "*"
+libcblas = "*"
+libboost-devel = "*"
+suitesparse = "*"
+eigen = "*"
+eigen-abi-devel = "*"
+freeimage = "*"
+glog = "*"
+gflags = "*"
+ceres-solver = "*"
+flann = "*"
+sqlite = "*"
+vlfeat = "*"
+lz4-c = "*"
+metis = "*"
+openimageio = "*"
+fmt = "*"
+poselib = "*"
 # openblas variant: the mkl variant links MKL 2025 sonames (.so.2) which conflict with the
 # current conda-forge mkl 2026 (.so.3).
 libfaiss = { version = "*", build = "cuda*openblas*" }
-openimageio = "3.1.*"
+libgomp = "*"
 
 [tool.pixi.feature.colmap]
 platforms = ["linux-64-cuda"]
 
 [tool.pixi.feature.colmap.tasks]
-colmap-features = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; colmap feature_extractor --database_path ./database.db --image_path ./images --ImageReader.single_camera 1 --ImageReader.camera_model OPENCV' --", description = "Run COLMAP feature extraction in a scene folder" }
-colmap-match = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; colmap sequential_matcher --database_path ./database.db' --", description = "Run COLMAP sequential matching in a scene folder" }
-colmap-map = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; mkdir -p ./sparse; colmap mapper --database_path ./database.db --image_path ./images --output_path ./sparse --Mapper.ba_local_backend CASPAR --Mapper.ba_global_backend CASPAR' --", description = "Run COLMAP mapper in a scene folder" }
+colmap-build = { cmd = "bash -lc 'set -euo pipefail; if [ -x \"$CONDA_PREFIX/bin/colmap\" ]; then echo \"colmap already installed, skipping build (delete $CONDA_PREFIX/bin/colmap to force a rebuild)\"; exit 0; fi; src=.pixi-src/colmap; if [ ! -d \"$src\" ]; then git clone --depth 1 --branch 4.1.0 https://github.com/colmap/colmap.git \"$src\"; fi; cmake -S \"$src\" -B \"$src/build\" -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=\"$CONDA_PREFIX\" -DCUDA_ENABLED=ON -DCASPAR_ENABLED=ON -DCMAKE_CUDA_ARCHITECTURES=native -DGUI_ENABLED=OFF -DOPENGL_ENABLED=OFF -DCGAL_ENABLED=OFF -DLSD_ENABLED=OFF -DONNX_ENABLED=OFF -DFETCH_FAISS=OFF -DFETCH_POSELIB=OFF; cmake --build \"$src/build\" --target install'", description = "Compile colmap 4.1.0 with CasPAR from source into the pixi environment (skipped if already installed)" }
+colmap-features = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; colmap feature_extractor --database_path ./database.db --image_path ./images --ImageReader.single_camera 1 --ImageReader.camera_model SIMPLE_RADIAL' --", depends-on = ["colmap-build"], description = "Run COLMAP feature extraction in a scene folder" }
+colmap-match = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; colmap sequential_matcher --database_path ./database.db' --", depends-on = ["colmap-build"], description = "Run COLMAP sequential matching in a scene folder" }
+colmap-map = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; mkdir -p ./sparse; colmap mapper --database_path ./database.db --image_path ./images --output_path ./sparse --Mapper.ba_local_backend CASPAR --Mapper.ba_global_backend CASPAR' --", depends-on = ["colmap-build"], description = "Run COLMAP mapper in a scene folder" }
 
 # Tests feature: pytest plus gsplat as external reference. gsplat JIT-compiles its
 # CUDA extension on first use, so the environment carries the matching CUDA 12.8
