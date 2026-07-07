@@ -1,21 +1,12 @@
 """PLY import/export for splats in render space.
 
-``load_ply`` reads a 3DGS ``.ply`` and maps the stored (activation-space) fields
-to render-space inputs:
+``load_ply`` reads a 3DGS ``.ply`` and maps the stored fields to render-space inputs.
 
-    scales  = exp(scale_i)                     # log-scale     -> scale
-    quats   = normalize(rot_i)                 # raw quat       -> unit wxyz
-    colors  = clip(f_dc_i * C0 + 0.5, 0, 1)    # SH deg-0 coeff -> rgb
-    opac    = sigmoid(opacity)                 # logit          -> [0, 1]
+``write_ply`` takes the *render-space* splats and writes the inverse activation-space fields so a
+subsequent ``load_ply`` reproduces them. Normals are zeroed and ``f_rest`` is omitted.
 
-``write_ply`` takes the *render-space* splats (the same tensors ``render``
-consumes) and writes the inverse activation-space fields so a subsequent
-``load_ply`` reproduces them. Normals are zeroed and ``f_rest`` (higher-order SH)
-is omitted. ``load_ply`` reads neither, so a written file round-trips exactly
-through it (SH degree 0 only, which is all splax renders).
-
-``fetch`` downloads remote assets (e.g. scene ``.ply`` files) into a local cache
-and returns the cached path, so examples and tests can pull scenes on demand.
+``fetch`` downloads remote assets into a local cache and returns the cached path, so examples and
+tests can pull scenes on demand.
 """
 
 from __future__ import annotations
@@ -43,13 +34,9 @@ def fetch(
 ) -> Path:
     """Download ``url`` into a local cache and return the path to the cached file.
 
-    If the file is already cached and ``force`` is False, it is returned without
-    touching the network, so ``sha256`` is only verified on actual downloads, not
-    on cache hits. The cache directory defaults to ``$SPLAX_CACHE`` if set, else
-    ``$XDG_CACHE_HOME/splax`` if set, else ``~/.cache/splax``; ``cache`` overrides
-    all three. Cached files are named ``sha256(url)[:16] + "-" + basename`` so
-    entries are unique per URL yet human-recognizable, and downloads are atomic
-    (streamed to a temp file in the cache directory, then renamed into place).
+    If the file is already cached and ``force`` is False, it is returned immediately. ``sha256`` is
+    only verified on real downloads, not on cache hits. The cache directory defaults to
+    ``$SPLAX_CACHE`` if set, else ``$XDG_CACHE_HOME/splax`` if set, else ``~/.cache/splax``.
 
     Args:
         url: URL to download.
@@ -86,14 +73,17 @@ def fetch(
     return path
 
 
-def load_ply(path: str | Path) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+def load_ply(path: Path) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Read a 3DGS ``.ply`` into the five render-space arrays ``render`` consumes.
 
-    Returns (means, scales, quats, colors, opacities) as float32 jax arrays,
-    shapes (N, 3), (N, 3), (N, 4), (N, 3), (N, 1). SH degree 0 only (f_rest
-    ignored). Exact inverse of ``write_ply``.
+    Args:
+        path: Path to a 3DGS ``.ply`` file containing the fields ``x``, ``y``, ``z``,
+        ``scale_0..2``, ``rot_0..3``, ``f_dc_0..2``, and ``opacity``.
+
+    Returns:
+        means, scales (N, 3), quats (N, 4), colors (N, 3), opacities (N, 1) as float32 jax arrays.
     """
-    v = PlyData.read(path)["vertex"]
+    v = PlyData.read(str(path))["vertex"]
     means = jnp.asarray(np.stack([v["x"], v["y"], v["z"]], axis=-1), jnp.float32)
     scales = jnp.asarray(
         np.exp(np.stack([v[f"scale_{i}"] for i in range(3)], axis=-1)), jnp.float32
@@ -107,24 +97,22 @@ def load_ply(path: str | Path) -> tuple[jax.Array, jax.Array, jax.Array, jax.Arr
 
 
 def write_ply(
-    path: str | Path,
+    path: Path,
     means: jax.Array | np.ndarray,
     scales: jax.Array | np.ndarray,
     quats: jax.Array | np.ndarray,
     colors: jax.Array | np.ndarray,
     opacities: jax.Array | np.ndarray,
 ) -> None:
-    """Write render-space splats to a 3DGS ``.ply`` (inverse of ``load_ply``).
+    """Write render-space splats to a 3DGS ``.ply``.
 
-    Args mirror ``render``'s first five positional arguments:
-      means      (N, 3) world positions
-      scales     (N, 3) positive per-axis scales (stored as log)
-      quats      (N, 4) wxyz quaternions (normalized on write)
-      colors     (N, 3) rgb in [0, 1] (stored as SH deg-0 coeff (rgb-0.5)/C0)
-      opacities  (N, 1) or (N,) opacity in [0, 1] (stored as logit)
-
-    Fields written: x,y,z, nx,ny,nz (zero), f_dc_0..2, opacity, scale_0..2,
-    rot_0..3, exactly the set ``load_ply`` consumes.
+    Args:
+        path: Path to the output ``.ply`` file
+        means: (N, 3) world positions
+        scales: (N, 3) positive per-axis scales
+        quats: (N, 4) wxyz quaternions
+        colors: (N, 3) RGB in [0, 1]
+        opacities: (N, 1) or (N,) opacity in [0, 1]
     """
     means = np.asarray(means, np.float32)
     scales = np.asarray(scales, np.float32)
