@@ -1,15 +1,7 @@
 """Distill a large trained splat into a smaller student, end to end.
 
-Renders a teacher ``.ply`` from many synthetic in-scene poses and retrains a capped
-student on that dense synthetic dataset (``splax.distillation``), then measures the
-student on the REAL held-out COLMAP views of the scene the teacher was trained on --
-never on the synthetic views. The teacher's own held-out PSNR is reported as the
-compression ceiling.
-
-The teacher ``.ply`` lives in the scene's similarity-normalized frame (the frame
-``scripts/train_colmap.py`` exports); this script re-derives that exact frame from the
-same COLMAP scene (normalization is downscale-independent), so the teacher, the
-synthetic poses, and the eval cameras all share one coordinate system.
+Renders a teacher ``.ply`` from many synthetic in-scene poses and retrains a student with reduced
+gaussian count to match the teacher's outputs.
 
 Usage:
   python scripts/distill.py --teacher-ply data/scenes/drone_1p5M.ply \
@@ -22,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import time
 from pathlib import Path
 
@@ -30,7 +23,9 @@ import jax.numpy as jnp
 import numpy as np
 
 import splax
-from scripts.train_colmap import load_scene, psnr  # reuse the COLMAP loader + metric
+from scripts.train_colmap import load_scene, psnr
+
+logger = logging.getLogger(__name__)
 
 
 def _student_render(
@@ -60,27 +55,17 @@ def _student_render(
 def main() -> dict:
     """Run teacher to student distillation and return summary metrics."""
     ap = argparse.ArgumentParser()
-    ap.add_argument("--teacher-ply", default="data/scenes/drone_1p5M.ply")
-    ap.add_argument("--data", default="data/drone", help="COLMAP scene the teacher was trained on")
+    ap.add_argument("--teacher-ply", default="data/scenes/hall.ply")
+    ap.add_argument("--data", default="data/hall", help="COLMAP scene the teacher was trained on")
     ap.add_argument("--sparse-model", type=int, default=0)
     ap.add_argument("--n-student", type=int, default=150_000)
     ap.add_argument("--n-views", type=int, default=500, help="synthetic teacher views")
     ap.add_argument("--steps", type=int, default=3000)
     ap.add_argument("--batch-size", type=int, default=1)
-    ap.add_argument(
-        "--depth-lambda",
-        type=float,
-        default=0.0,
-        help="dense teacher-depth distillation weight (0 = off)",
-    )
+    ap.add_argument("--depth-lambda", type=float, default=0.0, help="depth distillation weight")
     ap.add_argument("--init", choices=["prune", "random"], default="prune")
     ap.add_argument("--downscale", type=int, default=2, help="eval (real-view) downscale")
-    ap.add_argument(
-        "--synth-downscale",
-        type=int,
-        default=4,
-        help="synthetic render downscale (coarser keeps host memory modest)",
-    )
+    ap.add_argument("--synth-downscale", type=int, default=4, help="synthetic render downscale")
     ap.add_argument("--eval-every", type=int, default=8)
     ap.add_argument("--n-eval", type=int, default=3)
     ap.add_argument("--seed", type=int, default=0)
@@ -90,7 +75,6 @@ def main() -> dict:
     ap.add_argument("--out-json", default=None)
     args = ap.parse_args()
 
-    # --- scene (eval intrinsics + real held-out views), same normalized frame ----
     scene = load_scene(
         args.data, args.downscale, args.eval_every, seed=args.seed, sparse_model=args.sparse_model
     )
@@ -100,29 +84,18 @@ def main() -> dict:
     eval_idxs = list(range(min(args.n_eval, len(eval_imgs))))
     train_vms = np.asarray(scene["train_vms"])
 
-    # --- synthetic render intrinsics (scaled to synth-downscale) -----------------
+    # scaled synthetic render intrinsics
     ratio = args.downscale / args.synth_downscale
     Hs, Ws = max(8, round(H * ratio)), max(8, round(W * ratio))
     fs = (intr[0] * ratio, intr[1] * ratio)
     cs = (intr[2] * ratio, intr[3] * ratio)
-    print(
-        f"eval {W}x{H} (ds{args.downscale}) | synthetic {Ws}x{Hs} (ds{args.synth_downscale}), "
-        f"{args.n_views} views -> {args.n_student} student gaussians, init={args.init}, "
-        f"depth_lambda={args.depth_lambda}"
-    )
 
-    # --- teacher (render-space) + ceiling ---------------------------------------
     tm, ts, tq, tc, to = splax.io.load_ply(args.teacher_ply)
     teacher = {"means": tm, "scales": ts, "quats": tq, "colors": tc, "opacities": to}
-    print(f"teacher {tm.shape[0]} gaussians from {args.teacher_ply}")
     teacher_pf = [
         psnr(_student_render(teacher, eval_vms[i], H, W, intr), eval_imgs[i]) for i in eval_idxs
     ]
     teacher_psnr = float(np.mean(teacher_pf))
-    print(
-        "teacher held-out PSNR (ceiling): "
-        f"{teacher_psnr:.2f} dB {[round(x, 2) for x in teacher_pf]}"
-    )
 
     def eval_hook(student: dict[str, jax.Array]) -> float:
         return float(
@@ -134,7 +107,6 @@ def main() -> dict:
             )
         )
 
-    # --- distill -----------------------------------------------------------------
     info: dict = {}
     t0 = time.perf_counter()
     student = splax.distillation.distill(
@@ -161,15 +133,9 @@ def main() -> dict:
         psnr(_student_render(student, eval_vms[i], H, W, intr), eval_imgs[i]) for i in eval_idxs
     ]
     final = float(np.mean(per_frame))
-    for c in info["curve"]:
-        print(
-            f"  step {c['step']:5d}  "
-            + (f"L1 {c.get('train_l1', '   -')}  " if "train_l1" in c else "")
-            + (f"eval {c['eval_psnr']:.2f} dB" if "eval_psnr" in c else "")
-        )
-    print(f"\nstudent held-out PSNR: {final:.2f} dB {[round(x, 2) for x in per_frame]}")
-    print(f"teacher ceiling {teacher_psnr:.2f} dB | gap {teacher_psnr - final:.2f} dB")
-    print(f"full pipeline wall: {total_wall:.1f}s (fit {info['wall']:.1f}s)")
+    logger.info(f"\nstudent held-out PSNR: {final:.2f} dB {[round(x, 2) for x in per_frame]}")
+    logger.info(f"teacher ceiling {teacher_psnr:.2f} dB | gap {teacher_psnr - final:.2f} dB")
+    logger.info(f"full pipeline wall: {total_wall:.1f}s (fit {info['wall']:.1f}s)")
 
     if args.out_ply:
         Path(args.out_ply).parent.mkdir(parents=True, exist_ok=True)
@@ -181,7 +147,7 @@ def main() -> dict:
             student["colors"],
             student["opacities"],
         )
-        print(f"wrote {args.out_ply}")
+        logger.info(f"wrote {args.out_ply}")
 
     result = {
         "teacher_ply": args.teacher_ply,
@@ -208,9 +174,10 @@ def main() -> dict:
         Path(args.out_json).parent.mkdir(parents=True, exist_ok=True)
         with open(args.out_json, "w") as f:
             json.dump(result, f, indent=2)
-        print(f"wrote {args.out_json}")
+        logger.info(f"wrote {args.out_json}")
     return result
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     main()

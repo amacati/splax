@@ -1,25 +1,10 @@
 """Fit a gaussian splat to the splax logo from a single fixed camera view.
 
-A demo/asset script (not part of the test suite): it overfits ~30k gaussians to
-one image -- docs/assets/logo.png -- from a random initialisation and captures renders
+Overfits ~30k gaussians to docs/assets/logo.png from a random initialisation and captures renders
 along the way so the logo can be seen emerging out of faint noise.
 
-Pipeline:
-  * load the logo, composite its alpha over white, downscale to ~800px wide.
-  * scatter N gaussians in a thin slab at depth ~1 facing an identity camera; a
-    pinhole focal chosen so the slab fills the frame. Random colours, tiny random
-    scales, low initial opacity -> the step-0 render is near-blank.
-  * plain per-group Adam (LRs borrowed from train_lego.py) on an L1 + 0.2 D-SSIM
-    photometric loss against the logo, ~3000 steps, white background.
-  * render checkpoints on a power-law step schedule (dense early where the image
-    changes fastest) and write:
-      results/logo_splat/step_<n>.png          -- individual checkpoints
-      results/logo_splat/progression.png       -- 2x5 labelled strip
-      results/logo_splat/logo_emerges.gif      -- 90-frame 30 FPS emergence loop
-
-The background color is parametrized (--bg): it controls BOTH the training
-target composite (logo alpha over that color) and the render background, so a
-dark-mode README variant is just `--bg '#0d1117'`. GIF transparency is 1-bit
+The background color is parametrized. It controls BOTH the training target composite and the render
+background, so a dark-mode README variant is just `--bg '#0d1117'`. GIF transparency is 1-bit
 and would fringe, so we ship one opaque GIF per theme instead.
 
 Usage:
@@ -31,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import time
 from pathlib import Path
 from typing import cast
@@ -48,6 +34,8 @@ from PIL import Image
 matplotlib.use("Agg")
 
 import splax
+
+logger = logging.getLogger(__name__)
 
 OUT = Path("results/logo_splat")
 LOGO = Path("docs/assets/logo.png")
@@ -240,7 +228,7 @@ def main() -> tuple[float, float]:
     OUT.mkdir(parents=True, exist_ok=True)
     gif_out.parent.mkdir(parents=True, exist_ok=True)
     target, H, W = load_target(bg)
-    print(f"target {W}x{H}, bg {args.bg}, {N} gaussians, {STEPS} steps")
+    logger.info(f"target {W}x{H}, bg {args.bg}, {N} gaussians, {STEPS} steps")
 
     params = init_params(N, H, W, SEED)
 
@@ -274,7 +262,7 @@ def main() -> tuple[float, float]:
 
     frames[0] = frame(params, H, W, bg)
     p0 = psnr(frames[0], target)
-    print(f"random-init PSNR: {p0:.2f} dB")
+    logger.info(f"random-init PSNR: {p0:.2f} dB")
 
     t0 = time.perf_counter()
     for it in range(1, STEPS + 1):
@@ -284,12 +272,12 @@ def main() -> tuple[float, float]:
             frames[it] = frame(params, H, W, bg)
         if it % 500 == 0 or it == STEPS:
             loss.block_until_ready()
-            print(f"step {it:5d}  loss {float(loss):.4f}")
+            logger.info(f"step {it:5d}  loss {float(loss):.4f}")
     wall = time.perf_counter() - t0
 
     final = frames[STEPS]
     p_final = psnr(final, target)
-    print(f"final PSNR: {p_final:.2f} dB  ({STEPS} steps in {wall:.1f}s)")
+    logger.info(f"final PSNR: {p_final:.2f} dB  ({STEPS} steps in {wall:.1f}s)")
 
     # individual checkpoints (strip steps)
     for s in STRIP_STEPS:
@@ -298,7 +286,7 @@ def main() -> tuple[float, float]:
     write_progression(frames, bg)
     write_gif(frames, gif_out)
 
-    print(f"wrote {OUT}/step_*.png, progression.png, {gif_out}")
+    logger.info(f"wrote {OUT}/step_*.png, progression.png, {gif_out}")
     return p_final, wall
 
 
@@ -324,8 +312,8 @@ def write_gif(frames: dict[int, np.ndarray], gif_out: Path) -> None:
     """Write the emergence gif with perceptual resampling."""
     kept = monotone_filter(candidate_steps(), frames)
     seq, labels, n_blend = perceptual_resample(kept, frames, GIF_N)
-    print(f"gif: {len(kept)} monotone checkpoints -> {len(seq)} frames ({n_blend} blended)")
-    print(f"gif frame steps: {labels}")
+    logger.info(f"gif: {len(kept)} monotone checkpoints -> {len(seq)} frames ({n_blend} blended)")
+    logger.info(f"gif frame steps: {labels}")
     seq = seq + [frames[STEPS]] * 45  # hold the final frame ~1.5 s
 
     def encode(seq: list[np.ndarray]) -> float:
@@ -342,8 +330,9 @@ def write_gif(frames: dict[int, np.ndarray], gif_out: Path) -> None:
             np.asarray(Image.fromarray(f).resize((w2, h2), Image.Resampling.LANCZOS)) for f in seq
         ]
         mb = encode(small)
-    print(f"gif: {len(seq)} frames incl. hold, {mb:.2f} MB")
+    logger.info(f"gif: {len(seq)} frames incl. hold, {mb:.2f} MB")
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     main()

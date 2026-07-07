@@ -1,12 +1,6 @@
-"""Web-based lattice editor for the splax logo -- docs/assets/logo_tiles.json.
+"""Web-based lattice editor for the splax logo.
 
-Recreates the hand editor referenced in docs/assets/gen_logo.py: tiles are
-faces on the rhombille lattice the JAX wordmark uses (lattice steps 25 x 43.3,
-faces spanned by a = (50, 0), b = (25, -43.3), c = (25, 43.3), plus the four
-half-face triangles). Anchors live on the i + j odd sublattice.
-
-Serves the editor at http://127.0.0.1:<port> and writes every edit straight
-back to the JSON file; run gen_logo.py afterwards to re-render the SVG.
+Serves the editor at http://127.0.0.1:<port> and writes every edit straight back to the JSON file.
 
 Controls (also shown in the toolbar):
   1-7                  select face shape (ab, ac, bc, ta1, ta2, tc1, tc2)
@@ -31,11 +25,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[1]
 SHAPES = ("ab", "ac", "bc", "ta1", "ta2", "tc1", "tc2")
@@ -611,7 +608,7 @@ def main() -> None:
     Handler.tile_file = args.file.resolve()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     url = f"http://127.0.0.1:{args.port}"
-    print(f"editing {args.file}\nserving at {url} -- ctrl+c to stop")
+    logger.info(f"editing {args.file}\nserving at {url}\nctrl+c to stop")
     webbrowser.open(url)
     try:
         server.serve_forever()
@@ -620,4 +617,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     main()
