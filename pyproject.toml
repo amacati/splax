@@ -118,7 +118,7 @@ exclude = ["splax/_intersect.py", "splax/_project.py", "splax/_rasterize.py"]
 channels = ["conda-forge"]
 platforms = [
     { name = "linux-64", platform = "linux-64" },
-    { name = "linux-64-cuda", platform = "linux-64", cuda = "12" },
+    { name = "linux-64-cuda", platform = "linux-64", cuda = "12.9" },
 ]
 
 [tool.pixi.dependencies]
@@ -133,7 +133,7 @@ splax = { path = "./", editable = true }
 viser = ">=1.0"
 
 [tool.pixi.feature.docs.dependencies]
-python = ">=3.12,<3.13"
+python = ">=3.12"
 properdocs = ">=1.5.0"
 mkdocs-material = ">=9.5.0"
 
@@ -153,22 +153,29 @@ docs-serve = { cmd = "properdocs serve --livereload", description = "Serve the d
 
 # COLMAP feature: SfM preprocessing tools in a dedicated environment.
 [tool.pixi.feature.colmap.dependencies]
-python = ">=3.12,<3.13"
-colmap = "*"
+python = ">=3.12"
+# The cuda build ships the CasPAR GPU bundle adjustment solver.
+colmap = { version = "4.1.*", build = "cuda*" }
+# colmap 4.1.0 conda-forge builds link libfaiss and libOpenImageIO but don't declare them as
+# dependencies. Remove once the recipe is fixed upstream.
+# openblas variant: the mkl variant links MKL 2025 sonames (.so.2) which conflict with the
+# current conda-forge mkl 2026 (.so.3).
+libfaiss = { version = "*", build = "cuda*openblas*" }
+openimageio = "3.1.*"
 
 [tool.pixi.feature.colmap]
-platforms = ["linux-64"]
+platforms = ["linux-64-cuda"]
 
 [tool.pixi.feature.colmap.tasks]
 colmap-features = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; colmap feature_extractor --database_path ./database.db --image_path ./images --ImageReader.single_camera 1 --ImageReader.camera_model OPENCV' --", description = "Run COLMAP feature extraction in a scene folder" }
 colmap-match = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; colmap sequential_matcher --database_path ./database.db' --", description = "Run COLMAP sequential matching in a scene folder" }
-colmap-map = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; mkdir -p ./sparse; colmap mapper --database_path ./database.db --image_path ./images --output_path ./sparse' --", description = "Run COLMAP mapper in a scene folder" }
+colmap-map = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; mkdir -p ./sparse; colmap mapper --database_path ./database.db --image_path ./images --output_path ./sparse --Mapper.ba_local_backend CASPAR --Mapper.ba_global_backend CASPAR' --", description = "Run COLMAP mapper in a scene folder" }
 
 # Tests feature: pytest plus gsplat as external reference. gsplat JIT-compiles its
 # CUDA extension on first use, so the environment carries the matching CUDA 12.8
 # compiler and headers (torch is cu128). Everything stays inside the pixi env.
 [tool.pixi.feature.tests.dependencies]
-python = ">=3.12,<3.13"
+python = ">=3.12"
 pytest = "*"
 cuda-nvcc = "12.8.*"
 cuda-cudart-dev = "12.8.*"
