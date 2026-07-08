@@ -248,6 +248,8 @@ splax = { path = "./", editable = true, extras = ["viewer"] }
 
 [tool.pixi.feature.lint.tasks]
 ty = { cmd = "ty check splax", description = "Type check the library" }
+ruff-check = { cmd = "ruff check splax scripts tests", description = "Check formatting and linting" }
+ruff-format-check = { cmd = "ruff format --check --diff .", description = "Check code formatting" }
 
 # Dist feature: build the wheel/sdist and publish.
 [tool.pixi.feature.dist.pypi-dependencies]

@@ -8,6 +8,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-      # Type check the library with only the lint dependency group.
-      - run: uv run --no-default-groups --group lint ty check splax
+      - name: Setup pixi
+        uses: prefix-dev/setup-pixi@v0.9.3
+        with:
+          pixi-version: v0.72.0
+          environments: lint
+          activate-environment: false
+          locked: true
+      # Type check the library with the lint Pixi environment.
+      - run: pixi run -e lint ty
