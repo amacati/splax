@@ -143,10 +143,10 @@ def test_batched_step_runs_under_jit_with_exposure_and_depth() -> None:
     opt = _sgd_opt(params)
     opt_state = opt.init(params)
     exp_tx = optax.sgd(1.0)
-    exp_p = tc.init_exposure(8)
+    exp_p = {"exp": tc.init_exposure(8)}
     exp_state = exp_tx.init(exp_p)
     step = tc._make_step(
-        opt, H, W, INTR, SSIM_L, OREG, SREG, depth_loss=True, exp_tx=exp_tx, batch=B
+        opt, H, W, INTR, SSIM_L, OREG, SREG, depth_loss=True, aux_tx=exp_tx, exp_opt=True, batch=B
     )
     gts = jax.random.uniform(jax.random.key(7), (B, H, W, 3))
     vms = jnp.broadcast_to(jnp.eye(4).at[2, 3].set(4.0), (B, 4, 4))
@@ -160,5 +160,5 @@ def test_batched_step_runs_under_jit_with_exposure_and_depth() -> None:
     )
     assert np.isfinite(float(l1))
     # only the touched exposure rows (0,3,5) moved, the rest stayed identity.
-    moved = np.abs(np.asarray(new_exp - exp_p)).sum((1, 2)) > 0
+    moved = np.abs(np.asarray(new_exp["exp"] - exp_p["exp"])).sum((1, 2)) > 0
     assert moved[[0, 3, 5]].all() and not moved[[1, 2, 4, 6, 7]].any()

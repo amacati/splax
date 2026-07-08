@@ -29,7 +29,7 @@ def test_parsers_and_conventions() -> None:
     tc = _load_module()
     cams = tc.read_cameras(SPARSE / "cameras.bin")
     imgs = tc.read_images(SPARSE / "images.bin")
-    xyz, rgb, ids = tc.read_points3D(SPARSE / "points3D.bin")
+    xyz, rgb, ids, _track_lens = tc.read_points3D(SPARSE / "points3D.bin")
 
     assert len(cams) >= 1 and len(imgs) > 0 and xyz.shape[0] > 0
     assert xyz.shape[1] == 3 and rgb.shape == xyz.shape
@@ -51,7 +51,7 @@ def test_parsers_and_conventions() -> None:
 
 def test_point_init_static_shapes() -> None:
     tc = _load_module()
-    xyz, rgb, _ids = tc.read_points3D(SPARSE / "points3D.bin")
+    xyz, rgb, _ids, _track_lens = tc.read_points3D(SPARSE / "points3D.bin")
     n = 8000
     p = tc.init_from_points(xyz[:3000].astype(np.float32), rgb[:3000], n, 0.1, seed=0)
     assert p["means"].shape == (n, 3)
