@@ -169,6 +169,10 @@ cuda-nvcc = "12.9.*"
 cuda-cudart-dev = "12.9.*"
 cuda-version = "12.9.*"
 libcurand-dev = "*"
+# Runtime CUDA libs for the onnxruntime-gpu execution provider (ALIKED/LightGlue).
+libcufft = "*"
+libcublas = "*"
+cudnn = "*"
 cmake = "*"
 ninja = "*"
 pkg-config = "*"
@@ -205,7 +209,7 @@ libgomp = "*"
 platforms = ["linux-64-cuda"]
 
 [tool.pixi.feature.colmap.tasks]
-colmap-build = { cmd = "bash -lc 'set -euo pipefail; if [ -x \"$CONDA_PREFIX/bin/colmap\" ]; then echo \"colmap already installed, skipping build (delete $CONDA_PREFIX/bin/colmap to force a rebuild)\"; exit 0; fi; src=.pixi-src/colmap; if [ ! -d \"$src\" ]; then git clone --depth 1 --branch 4.1.0 https://github.com/colmap/colmap.git \"$src\"; fi; cmake -S \"$src\" -B \"$src/build\" -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=\"$CONDA_PREFIX\" -DCUDA_ENABLED=ON -DCASPAR_ENABLED=ON -DCMAKE_CUDA_ARCHITECTURES=native -DGUI_ENABLED=OFF -DOPENGL_ENABLED=OFF -DCGAL_ENABLED=OFF -DLSD_ENABLED=OFF -DONNX_ENABLED=OFF -DFETCH_FAISS=OFF -DFETCH_POSELIB=OFF; cmake --build \"$src/build\" --target install'", description = "Compile colmap 4.1.0 with CasPAR from source into the pixi environment (skipped if already installed)" }
+colmap-build = { cmd = "bash -lc 'set -euo pipefail; if [ -x \"$CONDA_PREFIX/bin/colmap\" ]; then echo \"colmap already installed, skipping build (delete $CONDA_PREFIX/bin/colmap to force a rebuild)\"; exit 0; fi; src=.pixi-src/colmap; if [ ! -d \"$src\" ]; then git clone --depth 1 --branch 4.1.0 https://github.com/colmap/colmap.git \"$src\"; fi; cmake -S \"$src\" -B \"$src/build\" -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=\"$CONDA_PREFIX\" -DCUDA_ENABLED=ON -DCASPAR_ENABLED=ON -DCMAKE_CUDA_ARCHITECTURES=native -DGUI_ENABLED=OFF -DOPENGL_ENABLED=OFF -DCGAL_ENABLED=OFF -DLSD_ENABLED=OFF -DONNX_ENABLED=ON -DFETCH_ONNX=ON -DFETCH_FAISS=OFF -DFETCH_POSELIB=OFF; cmake --build \"$src/build\" --target install'", description = "Compile colmap 4.1.0 with CasPAR from source into the pixi environment (skipped if already installed)" }
 colmap-features = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; colmap feature_extractor --database_path ./database.db --image_path ./images --ImageReader.single_camera 1 --ImageReader.camera_model SIMPLE_RADIAL' --", depends-on = ["colmap-build"], description = "Run COLMAP feature extraction in a scene folder" }
 colmap-match = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; colmap sequential_matcher --database_path ./database.db' --", depends-on = ["colmap-build"], description = "Run COLMAP sequential matching in a scene folder" }
 colmap-map = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; mkdir -p ./sparse; colmap mapper --database_path ./database.db --image_path ./images --output_path ./sparse --Mapper.ba_local_backend CASPAR --Mapper.ba_global_backend CASPAR' --", depends-on = ["colmap-build"], description = "Run COLMAP mapper in a scene folder" }

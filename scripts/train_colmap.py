@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import logging
 import struct
@@ -112,9 +113,9 @@ def read_images(path: str | Path) -> list[dict]:
     return imgs
 
 
-def read_points3D(path: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return (xyz (M,3) float64, rgb (M,3) uint8, ids (M,) int64)."""
-    xyz, rgb, ids = [], [], []
+def read_points3D(path: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return (xyz (M,3) float64, rgb (M,3) uint8, ids (M,) int64, track_lens (M,) int64)."""
+    xyz, rgb, ids, track_lens = [], [], [], []
     with open(path, "rb") as f:
         (n,) = _r(f, "Q")
         for _ in range(n):
@@ -124,7 +125,13 @@ def read_points3D(path: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]
             xyz.append((x, y, z))
             rgb.append((rr, gg, bb))
             ids.append(pid)
-    return (np.asarray(xyz, np.float64), np.asarray(rgb, np.uint8), np.asarray(ids, np.int64))
+            track_lens.append(tl)
+    return (
+        np.asarray(xyz, np.float64),
+        np.asarray(rgb, np.uint8),
+        np.asarray(ids, np.int64),
+        np.asarray(track_lens, np.int64),
+    )
 
 
 def quat2mat(q: np.ndarray) -> np.ndarray:
@@ -184,21 +191,80 @@ def load_scene(
     max_depth_pts: int = 2048,
     seed: int = 0,
     sparse_model: int = 0,
+    load_workers: int = 16,
+    min_obs: int = 0,
+    sparse_dir: str = "sparse",
+    pose_filter: float = 0.0,
+    frame_step: int = 1,
+    adaptive_views: int = 0,
 ) -> dict:
     """Load a COLMAP scene, normalized, downscaled."""
     data_dir = Path(data_dir)
     # COLMAP can emit several disconnected sub-models (sparse/0, 1, ...); the largest
     # is not always 0, so the index is selectable.
-    sparse = data_dir / "sparse" / str(sparse_model)
+    sparse = data_dir / sparse_dir / str(sparse_model)
     cams = read_cameras(sparse / "cameras.bin")
     images = read_images(sparse / "images.bin")
-    pts_xyz, pts_rgb, pts_ids = read_points3D(sparse / "points3D.bin")
+    if min_obs > 0:
+        # Views with few triangulated observations have weakly constrained poses (frequent
+        # misregistrations on long video captures); drop them from train AND eval.
+        n_all = len(images)
+        images = [im for im in images if len(im["obs_pid"]) >= min_obs]
+        logger.info(f"min-obs filter: kept {len(images)}/{n_all} views (>= {min_obs} obs)")
+    if pose_filter > 0:
+        # Video captures: drop misregistered views that teleport away from the trajectory.
+        # A view is an outlier if its camera center deviates from the windowed median of the
+        # (temporally ordered) center path by more than pose_filter times the median
+        # consecutive-frame step. The window (15) absorbs excursions up to ~5 frames.
+        n_all = len(images)
+        ctr_path = np.array([-quat2mat(im["qvec"]).T @ im["tvec"] for im in images])
+        med_step = np.median(np.linalg.norm(np.diff(ctr_path, axis=0), axis=1))
+        half = 7
+        keep_mask = np.ones(n_all, bool)
+        for i in range(n_all):
+            lo, hi = max(0, i - half), min(n_all, i + half + 1)
+            resid = np.linalg.norm(ctr_path[i] - np.median(ctr_path[lo:hi], axis=0))
+            keep_mask[i] = resid <= pose_filter * med_step
+        images = [im for im, k in zip(images, keep_mask) if k]
+        logger.info(
+            f"pose filter: kept {len(images)}/{n_all} views "
+            f"(<= {pose_filter:g} x median step {med_step:.4f} off the median path)"
+        )
+    pts_xyz, pts_rgb, pts_ids, pts_track_lens = read_points3D(sparse / "points3D.bin")
     id2row = {int(pid): i for i, pid in enumerate(pts_ids)}
 
-    # camera centers + similarity normalization
+    # camera centers + similarity normalization. The gauge comes from the full filtered list,
+    # BEFORE the eval split and any train-view sampling, so runs with different sampling share
+    # the same normalized world and their eval scores stay comparable.
     centers = np.array([-quat2mat(im["qvec"]).T @ im["tvec"] for im in images])
     ctr = np.median(centers, axis=0)
     s = 1.0 / np.mean(np.linalg.norm(centers - ctr, axis=1))
+
+    # Eval split BEFORE train-view sampling: the held-out views (every eval_every-th filtered
+    # view) are a fixed benchmark, independent of how the train views are thinned.
+    eval_images = images[::eval_every]
+    train_images = [im for i, im in enumerate(images) if i % eval_every != 0]
+    if adaptive_views and len(train_images) > adaptive_views:
+        # Motion-adaptive thinning: sample views uniformly along the camera path (translation
+        # plus rotation angle in radians, which at ~unit camera distances contributes image
+        # motion of the same order). Uniform-in-time sampling underserves fast sections, which
+        # is where held-out views end up farthest from their training neighbours.
+        n_all = len(train_images)
+        ctr_path = np.array([-quat2mat(im["qvec"]).T @ im["tvec"] for im in train_images])
+        Rs = np.array([quat2mat(im["qvec"]) for im in train_images])
+        rel = np.einsum("nij,nkj->nik", Rs[1:], Rs[:-1])
+        tr = np.clip((np.trace(rel, axis1=1, axis2=2) - 1) / 2, -1, 1)
+        ang = np.arccos(tr)
+        dist = np.linalg.norm(np.diff(ctr_path, axis=0), axis=1) + ang
+        arc = np.concatenate([[0.0], np.cumsum(dist)])
+        targets = np.linspace(0.0, arc[-1], adaptive_views)
+        sel = np.unique(np.searchsorted(arc, targets).clip(0, n_all - 1))
+        train_images = [train_images[i] for i in sel]
+        logger.info(f"adaptive sampling: kept {len(train_images)}/{n_all} train views")
+    elif frame_step > 1:
+        n_all = len(train_images)
+        train_images = train_images[::frame_step]
+        logger.info(f"frame-step {frame_step}: kept {len(train_images)}/{n_all} train views")
 
     def normalize_pose(qvec: np.ndarray, tvec: np.ndarray) -> np.ndarray:
         """Similarity-transform a w2c pose: X' = s (X - ctr). R stays, t' = s(t + R ctr)."""
@@ -229,12 +295,7 @@ def load_scene(
     r = W / W0
     intr = (fx * r, fy * r, cx * r, cy * r)
 
-    # load and downscale images
-    train_imgs, train_vms, eval_imgs, eval_vms, eval_names = [], [], [], [], []
-    tp_uv, tp_depth, tp_mask = [], [], []  # per-train-view depth-reg targets (T2)
-    tgt_rng = np.random.default_rng(seed)
-    logger.info(f"loading {len(images)} images at {W}x{H} (downscale {downscale}) ...")
-    for i, im in enumerate(images):
+    def _load_view(im: dict) -> tuple[np.ndarray, np.ndarray]:
         fp = data_dir / "images" / im["name"]
         arr = iio.imread(fp)
         Hi, Wi = arr.shape[:2]
@@ -242,37 +303,64 @@ def load_scene(
         arr = arr[: H * fh, : W * fw].astype(np.float32) / 255.0
         arr = arr.reshape(H, fh, W, fw, 3).mean((1, 3))  # box downsample
         vm = normalize_pose(im["qvec"], im["tvec"])
-        if i % eval_every == 0:
-            eval_imgs.append(arr)
-            eval_vms.append(vm)
-            eval_names.append(im["name"])
-        else:
-            train_imgs.append(arr)
-            train_vms.append(vm)
+        return arr, vm
+
+    # load and downscale images
+    n_eval = len(eval_images)
+    n_train = len(train_images)
+    # Train images are stored uint8 (converted per step); GT came from uint8 JPEGs, so the only
+    # loss is sub-LSB rounding of the box-downsample mean. Cuts host RAM 4x -> all views fit.
+    train_imgs = np.empty((n_train, H, W, 3), np.uint8)
+    train_vms = np.empty((n_train, 4, 4), np.float32)
+    eval_imgs = np.empty((n_eval, H, W, 3), np.float32)
+    eval_vms = np.empty((n_eval, 4, 4), np.float32)
+    eval_names: list[str] = [""] * n_eval
+    tp_uv = np.empty((n_train, max_depth_pts, 2), np.float32)
+    tp_depth = np.empty((n_train, max_depth_pts), np.float32)
+    tp_mask = np.empty((n_train, max_depth_pts), np.float32)
+    tgt_rng = np.random.default_rng(seed)
+    n_workers = min(max(1, load_workers), n_train + n_eval)
+    logger.info(
+        f"loading {n_train} train / {n_eval} eval images at {W}x{H} "
+        f"(downscale {downscale}, {n_workers} workers) ..."
+    )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+        for i, (im, (arr, vm)) in enumerate(
+            zip(eval_images, pool.map(_load_view, eval_images), strict=True)
+        ):
+            eval_imgs[i] = arr
+            eval_vms[i] = vm
+            eval_names[i] = im["name"]
+        for i, (im, (arr, vm)) in enumerate(
+            zip(train_images, pool.map(_load_view, train_images), strict=True)
+        ):
+            train_imgs[i] = np.clip(arr * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
+            train_vms[i] = vm
             uv, dep, msk = _view_depth_targets(
                 im, vm, id2row, pts_xyz, r, W, H, max_depth_pts, tgt_rng
             )
-            tp_uv.append(uv)
-            tp_depth.append(dep)
-            tp_mask.append(msk)
+            tp_uv[i] = uv
+            tp_depth[i] = dep
+            tp_mask[i] = msk
     return {
-        "train_imgs": np.stack(train_imgs),
-        "train_vms": np.stack(train_vms),
-        "eval_imgs": np.stack(eval_imgs),
-        "eval_vms": np.stack(eval_vms),
+        "train_imgs": train_imgs,
+        "train_vms": train_vms,
+        "eval_imgs": eval_imgs,
+        "eval_vms": eval_vms,
         "eval_names": eval_names,
         "H": H,
         "W": W,
         "intr": intr,
         "pts_xyz": pts_xyz,
         "pts_rgb": pts_rgb,
+        "pts_track_lens": pts_track_lens,
         "cam_name": cam_name,
         "cam_params": params,
         "norm_scale": float(s),
         "norm_center": ctr,
-        "train_pts_uv": np.stack(tp_uv),
-        "train_pts_depth": np.stack(tp_depth),
-        "train_pts_mask": np.stack(tp_mask),
+        "train_pts_uv": tp_uv,
+        "train_pts_depth": tp_depth,
+        "train_pts_mask": tp_mask,
     }
 
 
@@ -289,21 +377,35 @@ def knn_scales(xyz: np.ndarray, k: int = 3, cap: float | None = None) -> np.ndar
 
 
 def init_from_points(
-    xyz: np.ndarray, rgb: np.ndarray, n: int, opa: float, seed: int = 0
+    xyz: np.ndarray,
+    rgb: np.ndarray,
+    n: int,
+    opa: float,
+    seed: int = 0,
+    weights: np.ndarray | None = None,
 ) -> dict[str, jax.Array]:
     """Fixed-N init from the sparse cloud (pad by jittered duplication / subsample)."""
     rng = np.random.default_rng(seed)
     m = xyz.shape[0]
+    prob = None
+    if weights is not None:
+        prob = np.log1p(np.asarray(weights, np.float64))
+        prob = np.clip(prob, 0.0, None)
+        total = float(prob.sum())
+        if total > 0:
+            prob = prob / total
+        else:
+            prob = None
     # cap init gaussian size (normalized units, cameras sit at dist ~1) so a few isolated outlier
     # points don't seed giant gaussians.
     cap = 0.3
     if m >= n:
-        sel = rng.choice(m, n, replace=False)
+        sel = rng.choice(m, n, replace=False, p=prob)
         xyz_n, rgb_n = xyz[sel], rgb[sel]
         log_scales = knn_scales(xyz_n, cap=cap)
     else:
         pad = n - m
-        src = rng.integers(0, m, pad)
+        src = rng.choice(m, pad, replace=True, p=prob)
         base_ls = knn_scales(xyz, cap=cap)  # (m,) at the SPARSE m-point density
         # N-aware scale correction. knn_scales is the mean nearest-neighbour distance at the
         # *sparse* density (m points spread through the scene volume V). Padding to n>m gaussians
@@ -414,6 +516,38 @@ def apply_exposure(img: jax.Array, affine: jax.Array) -> jax.Array:
     return jnp.einsum("ij,hwj->hwi", M, img) + b
 
 
+# Per-image pose refinement
+
+# COLMAP poses of handheld video carry small residual errors (blur, rolling shutter, aliased loop
+# closures). A per-training-view 6D delta (axis-angle w, translation t) is left-composed onto the
+# w2c viewmat and optimized jointly with the splat. splax accumulates viewmat gradients, so this is
+# a first-class parameter. Held-out views keep their raw COLMAP poses: eval stays honest.
+
+
+def init_pose_deltas(ntr: int) -> jax.Array:
+    """Per-training-image 6D pose deltas (axis-angle, translation), zero-initialized."""
+    return jnp.zeros((ntr, 6), jnp.float32)
+
+
+def apply_pose_delta(vm: jax.Array, delta: jax.Array) -> jax.Array:
+    """Left-compose a small SE3 delta onto a w2c viewmat: R' = Rd R, t' = Rd t + td.
+
+    Rodrigues with the smooth A = sin(t)/t, B = (1-cos(t))/t^2 parameterization so the
+    zero-rotation init has well-defined gradients.
+    """
+    w, t = delta[:3], delta[3:]
+    theta2 = jnp.sum(w * w) + 1e-12
+    theta = jnp.sqrt(theta2)
+    A = jnp.sin(theta) / theta
+    B = (1.0 - jnp.cos(theta)) / theta2
+    K = jnp.array([[0.0, -w[2], w[1]], [w[2], 0.0, -w[0]], [-w[1], w[0], 0.0]])
+    Rd = jnp.eye(3) + A * K + B * (K @ K)
+    out = jnp.eye(4, dtype=vm.dtype)
+    out = out.at[:3, :3].set(Rd @ vm[:3, :3])
+    out = out.at[:3, 3].set(Rd @ vm[:3, 3] + t)
+    return out
+
+
 def psnr(a: np.ndarray | jax.Array, b: np.ndarray | jax.Array) -> float:
     """Compute PSNR from two images in [0, 1]."""
     mse = float(np.mean((np.clip(np.asarray(a), 0, 1) - np.asarray(b)) ** 2))
@@ -451,10 +585,15 @@ def _make_step(
     ssim_lambda: float,
     opacity_reg: float,
     scale_reg: float,
+    opacity_entropy: float = 0.0,
+    flat_reg: float = 0.0,
     antialiased: bool = False,
     depth_loss: bool = False,
     depth_lambda: float = 1e-2,
-    exp_tx: optax.GradientTransformation | None = None,
+    aux_tx: optax.GradientTransformation | None = None,
+    exp_opt: bool = False,
+    pose_opt: bool = False,
+    pose_reg: float = 0.0,
     batch: int = 1,
 ) -> Callable:
     """Build a jitted train step.
@@ -463,13 +602,14 @@ def _make_step(
         * ``bg`` is a per-step render-side background color
         * ``depth_loss`` adds a scale-normalized masked L1 between the rendered expected-depth
         channel and those points' camera-space depths, weighted by ``depth_lambda``
-        * ``exp_tx`` per-image exposure table when given an optax optimizer. Applies a view's 3x4
-        affine to the render before the photometric terms, and returns the updated table.
+        * ``aux_tx`` optimizer for the per-image auxiliary tables (dict with any of ``exp`` /
+        ``pose``, per ``exp_opt`` / ``pose_opt``). ``exp`` applies a view's 3x4 affine to the
+        render before the photometric terms; ``pose`` left-composes a 6D delta onto the viewmat.
     """
 
     def per_view(
         p: dict[str, jax.Array],
-        exp_p: jax.Array | None,
+        aux_p: dict[str, jax.Array] | None,
         gt: jax.Array,
         vm: jax.Array,
         bg: jax.Array,
@@ -479,6 +619,10 @@ def _make_step(
         pts_mask: jax.Array,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
         """Photometric + depth terms for ONE view (vmapped over the batch axis)."""
+        if pose_opt:
+            assert aux_p is not None
+            dlt = jax.lax.dynamic_index_in_dim(aux_p["pose"], vi, axis=0, keepdims=False)
+            vm = apply_pose_delta(vm, dlt)
         if depth_loss:
             img, depth = render_params(
                 p, vm, H, W, intr, background=bg, antialiased=antialiased, render_depth=True
@@ -493,8 +637,9 @@ def _make_step(
         else:
             img, _ = render_params(p, vm, H, W, intr, background=bg, antialiased=antialiased)
             dl = jnp.array(0.0, jnp.float32)
-        if exp_tx is not None:
-            affine = jax.lax.dynamic_index_in_dim(exp_p, vi, axis=0, keepdims=False)
+        if exp_opt:
+            assert aux_p is not None
+            affine = jax.lax.dynamic_index_in_dim(aux_p["exp"], vi, axis=0, keepdims=False)
             img = apply_exposure(img, affine)
         l1 = jnp.mean(jnp.abs(img - gt))
         dssim = jnp.asarray(1.0 - dm_pix.ssim(img, gt))
@@ -502,7 +647,7 @@ def _make_step(
 
     def loss_fn(
         p: dict[str, jax.Array],
-        exp_p: jax.Array | None,
+        aux_p: dict[str, jax.Array] | None,
         gt: jax.Array,
         vm: jax.Array,
         bg: jax.Array,
@@ -512,17 +657,32 @@ def _make_step(
         pts_mask: jax.Array,
     ) -> tuple[jax.Array, jax.Array]:
         l1s, dssims, dls = jax.vmap(per_view, in_axes=(None, None, 0, 0, 0, 0, 0, 0, 0))(
-            p, exp_p, gt, vm, bg, vi, pts_uv, pts_depth, pts_mask
+            p, aux_p, gt, vm, bg, vi, pts_uv, pts_depth, pts_mask
         )
         l1 = jnp.mean(l1s)  # batch-mean photometric (gsplat)
         loss = (1.0 - ssim_lambda) * l1 + ssim_lambda * jnp.mean(dssims)
         loss = loss + opacity_reg * jnp.mean(jax.nn.sigmoid(p["opac_logit"]))
         loss = loss + scale_reg * jnp.mean(jnp.exp(p["log_scales"]))
+        if opacity_entropy > 0:
+            # SuGaR-style binarization: drive opacities toward 0 or 1 so gaussians
+            # act as opaque surface elements rather than semi-transparent fog.
+            a = jax.nn.sigmoid(p["opac_logit"])
+            ent = -(a * jnp.log(a + 1e-8) + (1.0 - a) * jnp.log(1.0 - a + 1e-8))
+            loss = loss + opacity_entropy * jnp.mean(ent)
+        if flat_reg > 0:
+            # SuGaR-style flatness: shrink only the smallest axis so gaussians
+            # become disks that can align with surfaces.
+            loss = loss + flat_reg * jnp.mean(jnp.min(jnp.exp(p["log_scales"]), axis=-1))
         if depth_loss:
             loss = loss + depth_lambda * jnp.mean(dls)
+        if pose_opt and pose_reg > 0:
+            # L2 anchor on the pose deltas: keeps the train poses in the COLMAP gauge so the
+            # fixed held-out poses stay consistent with the reconstructed world.
+            assert aux_p is not None
+            loss = loss + pose_reg * jnp.mean(aux_p["pose"] ** 2)
         return loss, l1
 
-    if exp_tx is None:
+    if aux_tx is None:
 
         @jax.jit
         def step(
@@ -535,7 +695,7 @@ def _make_step(
             pts_depth: jax.Array,
             pts_mask: jax.Array,
         ) -> tuple[dict[str, jax.Array], optax.OptState, jax.Array]:
-            vi = jnp.zeros((batch,), jnp.int32)  # unused when exp_tx is None
+            vi = jnp.zeros((batch,), jnp.int32)  # unused when aux_tx is None
             (loss, l1), grads = jax.value_and_grad(loss_fn, has_aux=True)(
                 p, None, gt, vm, bg, vi, pts_uv, pts_depth, pts_mask
             )
@@ -548,8 +708,8 @@ def _make_step(
         def step(
             p: dict[str, jax.Array],
             opt_state: optax.OptState,
-            exp_p: jax.Array,
-            exp_state: optax.OptState,
+            aux_p: dict[str, jax.Array],
+            aux_state: optax.OptState,
             gt: jax.Array,
             vm: jax.Array,
             bg: jax.Array,
@@ -557,18 +717,20 @@ def _make_step(
             pts_uv: jax.Array,
             pts_depth: jax.Array,
             pts_mask: jax.Array,
-        ) -> tuple[dict[str, jax.Array], optax.OptState, jax.Array, optax.OptState, jax.Array]:
-            (loss, l1), (grads, exp_grads) = jax.value_and_grad(
+        ) -> tuple[
+            dict[str, jax.Array], optax.OptState, dict[str, jax.Array], optax.OptState, jax.Array
+        ]:
+            (loss, l1), (grads, aux_grads) = jax.value_and_grad(
                 loss_fn, argnums=(0, 1), has_aux=True
-            )(p, exp_p, gt, vm, bg, vi, pts_uv, pts_depth, pts_mask)
+            )(p, aux_p, gt, vm, bg, vi, pts_uv, pts_depth, pts_mask)
             updates, opt_state = opt.update(grads, opt_state, p)
-            exp_updates, exp_state = exp_tx.update(exp_grads, exp_state, exp_p)
+            aux_updates, aux_state = aux_tx.update(aux_grads, aux_state, aux_p)
             # apply_updates is typed as the broad optax ArrayTree; the pytrees keep their types.
             return (
                 cast("dict[str, jax.Array]", optax.apply_updates(p, updates)),
                 opt_state,
-                cast("jax.Array", optax.apply_updates(exp_p, exp_updates)),
-                exp_state,
+                cast("dict[str, jax.Array]", optax.apply_updates(aux_p, aux_updates)),
+                aux_state,
                 l1,
             )
 
@@ -585,13 +747,26 @@ def train(args: argparse.Namespace) -> dict:
         max_depth_pts=args.max_depth_pts,
         seed=args.seed,
         sparse_model=args.sparse_model,
+        load_workers=args.load_workers,
+        min_obs=args.min_obs,
+        sparse_dir=args.sparse_dir,
+        pose_filter=args.pose_filter,
+        frame_step=args.frame_step,
+        adaptive_views=args.adaptive_views,
     )
     H, W, intr = scene["H"], scene["W"], scene["intr"]
     ntr = scene["train_imgs"].shape[0]
     logger.info(f"{ntr} train / {len(scene['eval_names'])} eval views")
     logger.info(f"{scene['pts_xyz'].shape[0]} sparse points -> {args.n} gaussians")
 
-    params = init_from_points(scene["pts_xyz"], scene["pts_rgb"], args.n, args.init_opa, args.seed)
+    params = init_from_points(
+        scene["pts_xyz"],
+        scene["pts_rgb"],
+        args.n,
+        args.init_opa,
+        args.seed,
+        weights=scene["pts_track_lens"]
+    )
 
     # host-side image stacks; move one view per step (keeps GPU memory modest)
     train_imgs = scene["train_imgs"]
@@ -616,7 +791,10 @@ def train(args: argparse.Namespace) -> dict:
             for i in idxs
         ]
 
-    eval_idxs = list(range(min(args.n_eval, len(eval_imgs))))
+    # spread the scored eval views over the whole trajectory. The first n_eval held-out
+    # views all come from the start of the capture and are not representative.
+    n_scored = min(args.n_eval, len(eval_imgs))
+    eval_idxs = sorted(set(np.linspace(0, len(eval_imgs) - 1, n_scored).astype(int).tolist()))
 
     # Scale batched learning rates by sqrt(B) and adjust relocation steps
     B = args.batch_size
@@ -630,13 +808,31 @@ def train(args: argparse.Namespace) -> dict:
     if B > 1:
         logger.info(f"Batched training: LRs scaled to {lr_scale:.3f}, relocate and refine adjusted")
 
-    means_sched = optax.exponential_decay(args.means_lr * lr_scale, args.steps, 0.01)
+    decay_steps = args.decay_steps if args.decay_steps else args.steps
+    means_sched = optax.exponential_decay(args.means_lr * lr_scale, decay_steps, 0.01)
+
+    def group_sched(lr: float) -> float | optax.Schedule:
+        """Constant LR, or plateau + exponential decay to 1% when --late-decay-start is set.
+
+        Only the means LR is scheduled in the base recipe; the other groups step at full size
+        forever, which keeps churning the model (and the eval score) late into long runs.
+        """
+        if not args.late_decay_start:
+            return lr
+        return optax.join_schedules(
+            [
+                optax.constant_schedule(lr),
+                optax.exponential_decay(lr, max(1, args.steps - args.late_decay_start), 0.01),
+            ],
+            [args.late_decay_start],
+        )
+
     txs: dict[Hashable, optax.GradientTransformation] = {
         "means": optax.adam(means_sched),
-        "log_scales": optax.adam(args.scales_lr * lr_scale),
-        "quats": optax.adam(args.quats_lr * lr_scale),
-        "colors_logit": optax.adam(args.colors_lr * lr_scale),
-        "opac_logit": optax.adam(args.opac_lr * lr_scale),
+        "log_scales": optax.adam(group_sched(args.scales_lr * lr_scale)),
+        "quats": optax.adam(group_sched(args.quats_lr * lr_scale)),
+        "colors_logit": optax.adam(group_sched(args.colors_lr * lr_scale)),
+        "opac_logit": optax.adam(group_sched(args.opac_lr * lr_scale)),
     }
     opt = optax.multi_transform(txs, {k: k for k in params})
     opt_state = opt.init(params)
@@ -665,15 +861,25 @@ def train(args: argparse.Namespace) -> dict:
         )
         return {**p, "means": m}
 
-    # Per-image affine exposure correction uses an optax param group with its own LR
-    exp_tx = None
-    exp_params: jax.Array | None = None
-    exp_state: optax.OptState | None = None
+    # Per-image auxiliary tables (exposure affine / pose delta), one optax group per table
+    aux_tx = None
+    aux_params: dict[str, jax.Array] | None = None
+    aux_state: optax.OptState | None = None
+    aux_txs: dict[Hashable, optax.GradientTransformation] = {}
     if args.exposure_opt:
-        exp_params = init_exposure(ntr)
-        exp_tx = optax.adam(args.exposure_lr * lr_scale)  # sqrt(B) scaled too (T6)
-        exp_state = exp_tx.init(exp_params)
+        aux_txs["exp"] = optax.adam(args.exposure_lr * lr_scale)  # sqrt(B) scaled too (T6)
         logger.info("Exposure correction enabled. Learning per-image affine transforms")
+    if args.pose_opt:
+        aux_txs["pose"] = optax.adam(args.pose_lr * lr_scale)
+        logger.info("Pose refinement enabled. Learning per-image SE3 deltas")
+    if aux_txs:
+        aux_params = {}
+        if args.exposure_opt:
+            aux_params["exp"] = init_exposure(ntr)
+        if args.pose_opt:
+            aux_params["pose"] = init_pose_deltas(ntr)
+        aux_tx = optax.multi_transform(aux_txs, {k: k for k in aux_params})
+        aux_state = aux_tx.init(aux_params)
     step_fn = _make_step(
         opt,
         H,
@@ -682,10 +888,15 @@ def train(args: argparse.Namespace) -> dict:
         args.ssim_lambda,
         args.opacity_reg,
         args.scale_reg,
+        opacity_entropy=args.opacity_entropy,
+        flat_reg=args.flat_reg,
         antialiased=args.antialiased,
         depth_loss=args.depth_loss,
         depth_lambda=args.depth_lambda,
-        exp_tx=exp_tx,
+        aux_tx=aux_tx,
+        exp_opt=args.exposure_opt,
+        pose_opt=args.pose_opt,
+        pose_reg=args.pose_reg,
         batch=B,
     )
 
@@ -703,7 +914,7 @@ def train(args: argparse.Namespace) -> dict:
         # pre-T6 ``order[it % ntr]`` sequence (default path unchanged).
         vis = [int(order[((it - 1) * B + 1 + j) % ntr]) for j in range(B)]
         vidx = np.asarray(vis)
-        gt = jnp.asarray(train_imgs[vidx])  # (B, H, W, 3)
+        gt = jnp.asarray(train_imgs[vidx].astype(np.float32) / 255.0)  # (B, H, W, 3)
         vm = train_vms[jnp.asarray(vidx)]  # (B, 4, 4)
         if args.random_bkgd:
             keys = jax.random.split(key, B + 1)  # B independent bg draws (T6)
@@ -716,12 +927,12 @@ def train(args: argparse.Namespace) -> dict:
             jnp.asarray(tp_depth[vidx]),
             jnp.asarray(tp_mask[vidx]),
         )
-        if exp_tx is not None:
-            params, opt_state, exp_params, exp_state, l1 = step_fn(
+        if aux_tx is not None:
+            params, opt_state, aux_params, aux_state, l1 = step_fn(
                 params,
                 opt_state,
-                exp_params,
-                exp_state,
+                aux_params,
+                aux_state,
                 gt,
                 vm,
                 bg,
@@ -809,6 +1020,12 @@ def main() -> None:
     ap.add_argument(
         "--sparse-model", type=int, default=0, help="COLMAP sub-model index under sparse/ "
     )
+    ap.add_argument(
+        "--load-workers",
+        type=int,
+        default=16,
+        help="parallel image decode workers (1 minimizes load-time memory growth)",
+    )
     ap.add_argument("--out-ply", default="data/scenes/train.ply")
     ap.add_argument("--downscale", type=int, default=4, help="image downscale factor")
     ap.add_argument("--eval-every", type=int, default=8, help="hold out every Nth image")
@@ -833,6 +1050,20 @@ def main() -> None:
     )
     ap.add_argument("--log-every", type=int, default=200)
     # 6d MCMC recipe defaults (transferred via scene normalization)
+    ap.add_argument(
+        "--decay-steps",
+        type=int,
+        default=None,
+        help="horizon for the means-LR (and thus MCMC noise) exponential decay; "
+        "defaults to --steps. Set to keep the decay pace when training longer.",
+    )
+    ap.add_argument(
+        "--late-decay-start",
+        type=int,
+        default=0,
+        help="from this step, decay the scales/quats/colors/opacity LRs exponentially to 1%% "
+        "by --steps (0 = constant LRs, the base recipe)",
+    )
     ap.add_argument("--means-lr", type=float, default=1.5e-3)
     ap.add_argument("--scales-lr", type=float, default=5e-3)
     ap.add_argument("--quats-lr", type=float, default=1e-3)
@@ -841,6 +1072,18 @@ def main() -> None:
     ap.add_argument("--ssim-lambda", type=float, default=0.2)
     ap.add_argument("--opacity-reg", type=float, default=0.01)
     ap.add_argument("--scale-reg", type=float, default=0.01)
+    ap.add_argument(
+        "--opacity-entropy",
+        type=float,
+        default=0.0,
+        help="weight of the SuGaR-style opacity binarization term (0=off)",
+    )
+    ap.add_argument(
+        "--flat-reg",
+        type=float,
+        default=0.0,
+        help="weight of the SuGaR-style min-axis scale penalty (0=off)",
+    )
     ap.add_argument("--noise-lr", type=float, default=5e5)
     ap.add_argument(
         "--noise-stop-iter",
@@ -879,12 +1122,60 @@ def main() -> None:
         default=2048,
         help="fixed max COLMAP sparse points per view for depth reg",
     )
+    ap.add_argument(
+        "--sparse-dir",
+        default="sparse",
+        help="name of the sparse reconstruction dir under the scene dir",
+    )
+    ap.add_argument(
+        "--pose-filter",
+        type=float,
+        default=0.0,
+        help="drop views whose camera center deviates from the windowed-median "
+        "trajectory by more than this multiple of the median step (0 = off)",
+    )
+    ap.add_argument(
+        "--frame-step",
+        type=int,
+        default=1,
+        help="keep every Nth view (video captures are highly redundant)",
+    )
+    ap.add_argument(
+        "--adaptive-views",
+        type=int,
+        default=0,
+        help="keep ~N views sampled uniformly along the camera path (translation + rotation) "
+        "instead of uniformly in time; overrides --frame-step (0 = off)",
+    )
+    ap.add_argument(
+        "--min-obs",
+        type=int,
+        default=0,
+        help="drop views with fewer triangulated COLMAP observations (weakly "
+        "constrained poses, frequent misregistrations on video captures); 0 keeps all",
+    )
     ap.add_argument("--out-json", default=None, help="dump the result dict as JSON")
     ap.add_argument(
         "--exposure-opt", action="store_true", help="learn a per-training-image color correction"
     )
     ap.add_argument(
         "--exposure-lr", type=float, default=1e-3, help="LR for the exposure affine params"
+    )
+    ap.add_argument(
+        "--pose-opt",
+        action="store_true",
+        help="jointly refine per-training-view SE3 pose deltas (splax viewmat grads). "
+        "Held-out poses stay fixed. NOTE: the COLMAP depth-reg targets are computed "
+        "from the unrefined poses and go slightly stale as deltas grow.",
+    )
+    ap.add_argument(
+        "--pose-lr", type=float, default=1e-4, help="LR for the per-view pose deltas"
+    )
+    ap.add_argument(
+        "--pose-reg",
+        type=float,
+        default=0.0,
+        help="L2 anchor on the pose deltas (gauge stays tied to COLMAP; try 1e-1)",
     )
     ap.add_argument("--no-plot", dest="plot", action="store_false")
     args = ap.parse_args()
