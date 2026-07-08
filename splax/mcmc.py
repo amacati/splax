@@ -161,7 +161,7 @@ def inject_noise(
     """
     opac = jax.nn.sigmoid(opac_logit).reshape(means.shape[0])
     scales = jnp.exp(log_scales)
-    rot = R.from_quat(quats).as_matrix()
+    rot = R.from_quat(quats, scalar_first=True).as_matrix()
     m = rot * scales[:, None, :]  # R diag(scale) with Sigma = m m^T
     op_sig = jax.nn.sigmoid(100.0 * ((1.0 - opac) - 0.995))
     noise = jax.random.normal(key, means.shape) * (op_sig * scaler)[:, None]

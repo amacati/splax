@@ -266,7 +266,7 @@ default = { features = ["cuda"], solve-group = "default" }
 docs = { features = ["docs"], solve-group = "docs" }
 colmap = { features = ["colmap"], solve-group = "colmap" }
 tests = { features = ["cuda", "tests"], solve-group = "default" }
-lint = { features = ["cuda", "lint"], solve-group = "default" }
+lint = { features = ["lint"], solve-group = "default" }
 dist = { features = ["cuda", "dist"], solve-group = "default" }
 
 [tool.setuptools.packages]
