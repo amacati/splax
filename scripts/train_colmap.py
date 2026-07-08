@@ -765,7 +765,7 @@ def train(args: argparse.Namespace) -> dict:
         args.n,
         args.init_opa,
         args.seed,
-        weights=scene["pts_track_lens"]
+        weights=scene["pts_track_lens"],
     )
 
     # host-side image stacks; move one view per step (keeps GPU memory modest)
@@ -1168,9 +1168,7 @@ def main() -> None:
         "Held-out poses stay fixed. NOTE: the COLMAP depth-reg targets are computed "
         "from the unrefined poses and go slightly stale as deltas grow.",
     )
-    ap.add_argument(
-        "--pose-lr", type=float, default=1e-4, help="LR for the per-view pose deltas"
-    )
+    ap.add_argument("--pose-lr", type=float, default=1e-4, help="LR for the per-view pose deltas")
     ap.add_argument(
         "--pose-reg",
         type=float,
