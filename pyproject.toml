@@ -244,6 +244,7 @@ tests = { cmd = "pytest -v tests", description = "Run tests" }
 # Lint feature: ty type checking of the library.
 [tool.pixi.feature.lint.pypi-dependencies]
 ty = "==0.0.56"
+splax = { path = "./", editable = true, extras = ["viewer"] }
 
 [tool.pixi.feature.lint.tasks]
 ty = { cmd = "ty check splax", description = "Type check the library" }
