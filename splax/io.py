@@ -78,7 +78,7 @@ def load_ply(path: Path) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, ja
 
     Args:
         path: Path to a 3DGS ``.ply`` file containing the fields ``x``, ``y``, ``z``,
-        ``scale_0..2``, ``rot_0..3``, ``f_dc_0..2``, and ``opacity``.
+            ``scale_0..2``, ``rot_0..3``, ``f_dc_0..2``, and ``opacity``.
 
     Returns:
         means, scales (N, 3), quats (N, 4), colors (N, 3), opacities (N, 1) as float32 jax arrays.
