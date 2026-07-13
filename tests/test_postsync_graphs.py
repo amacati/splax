@@ -17,7 +17,7 @@ import numpy as np
 
 import splax
 import splax._intersect as _isect
-import splax._rasterize as _rast
+import splax._rasterize._kernels as _rast
 
 if TYPE_CHECKING:
     import pytest

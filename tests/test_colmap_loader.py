@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 if TYPE_CHECKING:
     import types
@@ -43,10 +44,10 @@ def test_parsers_and_conventions() -> None:
     assert imgs[0]["obs_xy"].shape == (obs.shape[0], 2)
     assert obs.shape[0] == 0 or all(int(p) in known for p in obs[:50])
 
-    # quat2mat returns a proper rotation (orthonormal, det +1)
-    R = tc.quat2mat(imgs[0]["qvec"])
-    assert np.allclose(R @ R.T, np.eye(3), atol=1e-5)
-    assert np.isclose(np.linalg.det(R), 1.0, atol=1e-5)
+    # the COLMAP qvec (scalar-first) is a proper rotation (orthonormal, det +1)
+    rot = Rotation.from_quat(imgs[0]["qvec"], scalar_first=True).as_matrix()
+    assert np.allclose(rot @ rot.T, np.eye(3), atol=1e-5)
+    assert np.isclose(np.linalg.det(rot), 1.0, atol=1e-5)
 
 
 def test_point_init_static_shapes() -> None:
