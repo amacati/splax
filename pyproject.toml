@@ -112,7 +112,7 @@ explicit = true
 [tool.ty.src]
 # The Warp-DSL kernel modules are excluded. Their kernel bodies are written in warp's kernel
 # language, which warp's type stubs cannot type.
-exclude = ["splax/_intersect.py", "splax/_project.py", "splax/_rasterize.py"]
+exclude = ["splax/_intersect.py", "splax/_project/_kernels.py", "splax/_rasterize/_kernels.py"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]

@@ -12,6 +12,7 @@ from functools import partial
 from typing import cast
 
 import jax
+import jax.core
 import jax.numpy as jnp
 
 from splax._project._kernels import (
@@ -169,7 +170,8 @@ def _materialize(ct: jax.Array | jax.custom_derivatives.SymbolicZero) -> jax.Arr
     # the cotangent's own shape and dtype, correct under batching too. XLA folds
     # the zeros away.
     if isinstance(ct, jax.custom_derivatives.SymbolicZero):
-        return jnp.zeros(ct.aval.shape, ct.aval.dtype)
+        aval = cast("jax.core.ShapedArray", ct.aval)
+        return jnp.zeros(aval.shape, aval.dtype)
     return cast("jax.Array", ct)
 
 
