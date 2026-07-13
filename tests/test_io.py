@@ -288,6 +288,41 @@ def test_fetch_etag_invalidates_cache(tmp_path: Path) -> None:
         server.server_close()
 
 
+def test_fetch_without_etag(tmp_path: Path) -> None:
+    """A remote that sends no ETag still downloads, re-fetching on every call."""
+    state = {"body": b"no etag bytes", "gets": 0}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def _headers(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(state["body"])))
+            self.end_headers()
+
+        def do_HEAD(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+            self._headers()
+
+        def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+            state["gets"] += 1
+            self._headers()
+            self.wfile.write(state["body"])
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass  # Keep pytest output clean.
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/scene.ply"
+    cache = tmp_path / "cache"
+    try:
+        assert fetch(url, cache=cache).read_bytes() == b"no etag bytes"
+        assert state["gets"] == 1
+        fetch(url, cache=cache)  # No ETag to compare: download again rather than serve stale.
+        assert state["gets"] == 2
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_fetch_env_cache(
     file_server: tuple[Path, str, list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -33,9 +33,10 @@ def fetch(url: str, *, cache: Path | None = None, force: bool = False) -> Path:
     """Download ``url`` into a local cache and return the path to the cached file.
 
     A cached file is reused only while its stored ETag still matches the remote, so a re-uploaded
-    asset at the same URL is re-downloaded without clearing the cache. Fetching with the ``force``
-    parameter ensures a fresh download. The cache directory defaults to ``$SPLAX_CACHE`` if set,
-    else ``$XDG_CACHE_HOME/splax`` if set, else ``~/.cache/splax``.
+    asset at the same URL is re-downloaded without clearing the cache. When the remote sends no
+    ETag there is nothing to compare, so the asset is downloaded afresh on every call. Fetching with
+    the ``force`` parameter ensures a fresh download. The cache directory defaults to
+    ``$SPLAX_CACHE`` if set, else ``$XDG_CACHE_HOME/splax`` if set, else ``~/.cache/splax``.
 
     Args:
         url: URL to download.
@@ -53,7 +54,7 @@ def fetch(url: str, *, cache: Path | None = None, force: bool = False) -> Path:
     path = cache / (hashlib.sha256(url.encode()).hexdigest()[:16] + "-" + name)
     token_path = cache / (path.name + ".etag")
     with urllib.request.urlopen(urllib.request.Request(url, method="HEAD")) as resp:
-        etag = resp.headers["ETag"]
+        etag = resp.headers.get("ETag")
     if not force and path.exists() and token_path.exists() and token_path.read_text() == etag:
         return path
     cache.mkdir(parents=True, exist_ok=True)
@@ -65,7 +66,8 @@ def fetch(url: str, *, cache: Path | None = None, force: bool = False) -> Path:
         os.replace(tmp.name, path)
     finally:
         Path(tmp.name).unlink(missing_ok=True)
-    token_path.write_text(etag)
+    if etag is not None:
+        token_path.write_text(etag)
     return path
 
 
