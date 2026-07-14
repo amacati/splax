@@ -250,7 +250,9 @@ CPATH = "$CONDA_PREFIX/targets/x86_64-linux/include"
 SCIPY_ARRAY_API = "1"
 
 [tool.pixi.feature.tests.pypi-dependencies]
-torch = ">=2.4"
+# Pin torch to the cu128 index. Without an explicit index pixi pulls PyPI's default torch, which
+# conflicts with jax.
+torch = { version = ">=2.7", index = "https://download.pytorch.org/whl/cu128" }
 gsplat = ">=1.5"
 
 [tool.pixi.feature.tests.tasks]
