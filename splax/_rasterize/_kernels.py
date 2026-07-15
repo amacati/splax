@@ -36,6 +36,10 @@ from splax._intersect import (
     _use_32bit_keys,
 )
 
+# Compile with approximate transcendentals and fp contraction, matching the CUDA reference's
+# -use_fast_math build flag.
+wp.set_module_options({"fast_math": True})
+
 # Post-sync CUDA graph capture, opt-in. Captures the whole
 # post-readback sequence (sentinel fill, depth minmax, map, sort, bin, blend) as
 # a cached CUDA graph and replays it, collapsing ~11 device launches into one

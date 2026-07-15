@@ -18,6 +18,10 @@ import warp as wp
 
 wp.init()
 
+# Compile with approximate transcendentals and fp contraction, matching the CUDA reference's
+# -use_fast_math build flag.
+wp.set_module_options({"fast_math": True})
+
 # One 16x16 pixel tile is processed by one 256-thread block. Tile shapes must be static, so these
 # are compile-time constants and the only supported geometry.
 BLOCK_WIDTH = wp.constant(16)

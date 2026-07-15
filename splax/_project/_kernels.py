@@ -23,6 +23,10 @@ from splax._intersect import (
     ellipse_tile_count,
 )
 
+# Compile with approximate transcendentals and fp contraction, matching the CUDA reference's
+# -use_fast_math build flag.
+wp.set_module_options({"fast_math": True})
+
 VIEW_BLOCK = wp.constant(256)  # threads per block for the tile_sum viewmat reduce
 _BWD_BLOCK = int(VIEW_BLOCK)
 
