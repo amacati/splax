@@ -789,7 +789,7 @@ def _rasterize_bwd_kernel(
         if sigma < 0.0:
             continue
         vis = wp.exp(-sigma)
-        alpha = wp.min(0.99, opac * vis)
+        alpha = wp.min(0.999, opac * vis)
         if alpha < 1.0 / 255.0:
             continue
 
@@ -811,20 +811,24 @@ def _rasterize_bwd_kernel(
 
         buffer = buffer + color * fac
 
-        v_sigma = -opac * vis * v_alpha
-        wp.atomic_add(
-            v_conic,
-            og,
-            wp.vec3(0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy),
-        )
-        wp.atomic_add(
-            v_xy,
-            og,
-            wp.vec2(
-                v_sigma * (conic[0] * dx + conic[1] * dy), v_sigma * (conic[1] * dx + conic[2] * dy)
-            ),
-        )
-        wp.atomic_add(v_opacity, og, vis * v_alpha)
+        # Where the alpha clamp is active alpha is constant, so the sigma and
+        # opacity paths carry no gradient.
+        if opac * vis <= 0.999:
+            v_sigma = -opac * vis * v_alpha
+            wp.atomic_add(
+                v_conic,
+                og,
+                wp.vec3(0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy),
+            )
+            wp.atomic_add(
+                v_xy,
+                og,
+                wp.vec2(
+                    v_sigma * (conic[0] * dx + conic[1] * dy),
+                    v_sigma * (conic[1] * dx + conic[2] * dy),
+                ),
+            )
+            wp.atomic_add(v_opacity, og, vis * v_alpha)
 
 
 # Depth-augmented backward. The depth channel is handled exactly like
@@ -908,7 +912,7 @@ def _rasterize_bwd_depth_kernel(
         if sigma < 0.0:
             continue
         vis = wp.exp(-sigma)
-        alpha = wp.min(0.99, opac * vis)
+        alpha = wp.min(0.999, opac * vis)
         if alpha < 1.0 / 255.0:
             continue
 
@@ -935,20 +939,24 @@ def _rasterize_bwd_depth_kernel(
         buffer = buffer + color * fac
         dbuffer = dbuffer + d * fac
 
-        v_sigma = -opac * vis * v_alpha
-        wp.atomic_add(
-            v_conic,
-            og,
-            wp.vec3(0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy),
-        )
-        wp.atomic_add(
-            v_xy,
-            og,
-            wp.vec2(
-                v_sigma * (conic[0] * dx + conic[1] * dy), v_sigma * (conic[1] * dx + conic[2] * dy)
-            ),
-        )
-        wp.atomic_add(v_opacity, og, vis * v_alpha)
+        # Where the alpha clamp is active alpha is constant, so the sigma and
+        # opacity paths carry no gradient.
+        if opac * vis <= 0.999:
+            v_sigma = -opac * vis * v_alpha
+            wp.atomic_add(
+                v_conic,
+                og,
+                wp.vec3(0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy),
+            )
+            wp.atomic_add(
+                v_xy,
+                og,
+                wp.vec2(
+                    v_sigma * (conic[0] * dx + conic[1] * dy),
+                    v_sigma * (conic[1] * dx + conic[2] * dy),
+                ),
+            )
+            wp.atomic_add(v_opacity, og, vis * v_alpha)
 
 
 def _rasterize_bwd_launch(
