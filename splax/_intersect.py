@@ -229,67 +229,50 @@ def clear_graph_cache() -> None:
     _graph_cache.clear()
 
 
-# Recorded per-kernel launches, keyed on (kernel, device). wp.launch resolves the
+# Recorded per-kernel launches, keyed on (kernel, device). Each entry is a
+# (wp.Launch, state) pair, where state holds the dim followed by one entry per
+# argument, arrays as (ptr, shape) and scalars by value. wp.launch resolves the
 # device, module, and hooks and repacks every argument on each call, which costs
 # 5 to 16 us of host time per launch on kernels with many arguments. A recorded
-# wp.Launch replays in about 2 us. Purged together with the scratch cache so a
-# recorded launch never keeps a freed scratch buffer alive through its retained
-# argument list.
+# wp.Launch replays in about 2 us, and diffing against the state repacks only
+# the arguments that changed. Repacking all arguments through set_params instead
+# costs 50 to 60 us more per frame over the five pipeline launches, so the diff
+# is load-bearing. Purged together with the scratch cache so a recorded launch
+# never keeps a freed scratch buffer alive through its retained argument list.
 _launch_cache: dict = {}
-
-
-class _CachedLaunch:
-    """Recorded kernel launch that repacks only the arguments that changed.
-
-    Records the launch once and keeps the packed parameter block. Each call
-    compares every argument against the recorded state, arrays by pointer and
-    shape and scalars by value, and repacks only mismatches before replaying.
-    FFI callbacks are serialized by Warp's callback lock, so the mutable state
-    needs no locking of its own.
-    """
-
-    __slots__ = ("block_dim", "dim", "launch", "state")
-
-    def __init__(
-        self, kernel: wp.Kernel, dim: int, args: list, device: wp.Device | None, block_dim: int = 0
-    ):
-        if block_dim:
-            self.launch = wp.launch_tiled(
-                kernel, dim=[dim], inputs=args, block_dim=block_dim, device=device, record_cmd=True
-            )
-        else:
-            self.launch = wp.launch(kernel, dim=dim, inputs=args, device=device, record_cmd=True)
-        self.block_dim = block_dim
-        self.dim = dim
-        self.state = [(a.ptr, a.shape) if isinstance(a, wp.array) else a for a in args]
-
-    def __call__(self, dim: int, args: list) -> None:
-        if dim != self.dim:
-            self.dim = dim
-            self.launch.set_dim([dim, self.block_dim] if self.block_dim else dim)
-        state = self.state
-        for i, a in enumerate(args):
-            if isinstance(a, wp.array):
-                key = (a.ptr, a.shape)
-                if state[i] != key:
-                    self.launch.set_param_at_index(i, a)
-                    state[i] = key
-            elif state[i] != a:
-                self.launch.set_param_at_index(i, a)
-                state[i] = a
-        self.launch.launch()
 
 
 def _cached_launch(
     kernel: wp.Kernel, dim: int, args: list, device: wp.Device | None, block_dim: int = 0
 ) -> None:
-    """Launch a kernel through its recorded per-device launch object."""
-    key = (kernel, str(device))
-    cl = _launch_cache.get(key)
-    if cl is None:
-        cl = _CachedLaunch(kernel, dim, args, device, block_dim)
-        _launch_cache[key] = cl
-    cl(dim, args)
+    """Launch a kernel through its recorded per-device launch object.
+
+    Records the launch on first use and afterwards replays it, repacking only the
+    arguments whose recorded state changed. FFI callbacks are serialized by
+    Warp's callback lock, so the state needs no locking of its own.
+    """
+    entry = _launch_cache.get((kernel, str(device)))
+    if entry is None:
+        if block_dim:
+            launch = wp.launch_tiled(
+                kernel, dim=[dim], inputs=args, block_dim=block_dim, device=device, record_cmd=True
+            )
+        else:
+            launch = wp.launch(kernel, dim=dim, inputs=args, device=device, record_cmd=True)
+        state = [dim] + [(a.ptr, a.shape) if isinstance(a, wp.array) else a for a in args]
+        _launch_cache[(kernel, str(device))] = (launch, state)
+        launch.launch()
+        return
+    launch, state = entry
+    if state[0] != dim:
+        state[0] = dim
+        launch.set_dim([dim, block_dim] if block_dim else dim)
+    for i, a in enumerate(args, start=1):
+        key = (a.ptr, a.shape) if isinstance(a, wp.array) else a
+        if state[i] != key:
+            state[i] = key
+            launch.set_param_at_index(i - 1, a)
+    launch.launch()
 
 
 # One pinned int32 staging element per device for the intersection-count
