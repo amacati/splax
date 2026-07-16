@@ -276,25 +276,44 @@ def _cached_launch(
 
 
 # One pinned int32 staging element per device for the intersection-count
-# readback. A pageable slice.numpy() readback allocates on every frame and
-# costs about 17 us of host time on an idle stream, the pinned copy plus
-# stream sync about 6 us.
+# readback, with an event fencing the copy. A pageable slice.numpy() readback
+# allocates on every frame and costs about 17 us of host time on an idle
+# stream, the pinned copy plus event sync about 6 us. The begin/end split lets
+# the caller enqueue count-independent kernels between the copy and the wait,
+# so they execute inside the sync bubble without delaying the readback.
 _readback_bufs: dict = {}
 
 
-def _read_count(src: wp.array, index: int, device: wp.Device | None) -> int:
-    """Read one int32 element back to the host."""
+def _read_count_begin(src: wp.array, index: int, device: wp.Device | None) -> tuple | int:
+    """Enqueue the one-element readback copy and fence it with an event.
+
+    On non-CUDA devices the read is synchronous and the value is returned
+    directly. Pass the result to _read_count_end for the integer either way.
+    """
     if device is None or not device.is_cuda:
         return int(src[index : index + 1].numpy()[0])
     key = str(device)
     buf = _readback_bufs.get(key)
     if buf is None:
         staging = wp.empty(1, dtype=wp.int32, device="cpu", pinned=True)
-        buf = (staging, staging.numpy())
+        buf = (staging, staging.numpy(), wp.Event(device))
         _readback_bufs[key] = buf
     wp.copy(buf[0], src, dest_offset=0, src_offset=index, count=1)
-    wp.synchronize_stream(device.stream)
-    return int(buf[1][0])
+    wp.record_event(buf[2])
+    return buf
+
+
+def _read_count_end(pending: tuple | int) -> int:
+    """Wait for the readback copy and return the count."""
+    if isinstance(pending, int):
+        return pending
+    wp.synchronize_event(pending[2])
+    return int(pending[1][0])
+
+
+def _read_count(src: wp.array, index: int, device: wp.Device | None) -> int:
+    """Read one int32 element back to the host."""
+    return _read_count_end(_read_count_begin(src, index, device))
 
 
 def _get_scratch(
@@ -684,17 +703,43 @@ def _sort_and_bin(
     bins_len = B * num_tiles
     opac_mod = map_opacities.shape[0]
 
-    # The one legitimate device to host sync, the total intersection count.
+    # The one legitimate device to host sync, the total intersection count. The
+    # copy is enqueued first and the wait happens below, so the tile_bins memset
+    # and the depth range pre-pass execute inside the sync bubble while the host
+    # waits for the scan result.
+    pending = None
     if num_intersects is None:
-        num_intersects = _read_count(cum_tiles_hit, total - 1, device)
+        pending = _read_count_begin(cum_tiles_hit, total - 1, device)
 
     isect_dtype = wp.int32 if packed else wp.int64
     scratch = _get_scratch(
-        device, (B, n, num_tiles), max(2 * num_intersects, 2), bins_len, isect_dtype
+        device,
+        (B, n, num_tiles),
+        2 if num_intersects is None else max(2 * num_intersects, 2),
+        bins_len,
+        isect_dtype,
     )
     # tile_bins is allocated at exactly bins_len for this signature.
     tile_bins = scratch["tile_bins"]
     tile_bins.zero_()
+    if packed:
+        # Device-side per-image [dmin, dmax] for the depth quantization, no host
+        # sync. Count-independent, so it launches before the readback wait.
+        depth_mm = scratch["depth_mm"]
+        _cached_launch(_seed_minmax, B, [depth_mm], device)
+        _cached_launch(
+            _depth_minmax,
+            (total + int(_MINMAX_CHUNK) - 1) // int(_MINMAX_CHUNK),
+            [depths, radii, total, n, depth_mm],
+            device,
+        )
+
+    if pending is not None:
+        num_intersects = _read_count_end(pending)
+        # Grow the sort buffers to the frame's count. Nothing above needs them.
+        scratch = _get_scratch(
+            device, (B, n, num_tiles), max(2 * num_intersects, 2), bins_len, isect_dtype
+        )
 
     if num_intersects == 0:
         return scratch["gaussian_ids"], tile_bins, 0
@@ -706,15 +751,6 @@ def _sort_and_bin(
     isect_ids = scratch["isect_ids"]
     gaussian_ids = scratch["gaussian_ids"]
     if packed:
-        # Device-side per-image [dmin, dmax] for the depth quantization, no host sync.
-        depth_mm = scratch["depth_mm"]
-        _cached_launch(_seed_minmax, B, [depth_mm], device)
-        _cached_launch(
-            _depth_minmax,
-            (total + int(_MINMAX_CHUNK) - 1) // int(_MINMAX_CHUNK),
-            [depths, radii, total, n, depth_mm],
-            device,
-        )
         _cached_launch(
             _map_intersects_32bit,
             total,
