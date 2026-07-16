@@ -65,6 +65,13 @@ def _bucket_count(ni: int) -> int:
     return max(ni, int(math.ceil(_GRAPH_BUCKET_STEP**k)))
 
 
+# One staged gaussian record: xy (2), opacity (1), conic (3). Packing every field
+# the alpha test needs into one vector lets a thread stage its gaussian with a
+# single shared write, and the whole record arrives with one shared read per
+# tested gaussian in the blend loop.
+_vec6 = wp.types.vector(length=6, dtype=wp.float32)
+
+
 @wp.kernel
 def _rasterize_fwd(
     img_h: wp.int32,
@@ -87,12 +94,13 @@ def _rasterize_fwd(
     out_img: wp.array2d[wp.vec3],
 ):
     # Cooperative shared-memory blend. One 256-thread block per (image, tile)
-    # cooperatively stages 256 gaussian records per batch into shared memory.
+    # stages 256 gaussian records per batch into shared memory, each thread
+    # gathering exactly one gaussian with a single masked shared write per tile.
     # image_id = block // num_tiles decodes the batch element. Outputs are the
     # collapsed batched buffers (B*H, W), written at row image_id*H + i. The
     # gathered gaussian ids are flat (b*N + gid). xys and conics are batched, so
     # the flat id indexes them directly, while broadcast size-N colors and
-    # opacities are shifted back via the modulo below.
+    # opacities are shifted back via a per-thread modulo at gather time.
     tile_g, tr = wp.tid()  # launch_tiled: block index and thread rank
     image_id = tile_g // num_tiles
     tile_local = tile_g % num_tiles
@@ -121,45 +129,47 @@ def _rasterize_fwd(
     cur_idx = wp.int32(0)
     pix_out = wp.vec3(0.0, 0.0, 0.0)
 
-    # Broadcast size-N attributes must be read at the local gid, batched size B*N
-    # ones at the flat id. Modulo by the array's own leading dim does both and
-    # keeps every OOB lane the cooperative load pulls in bounds.
+    # Colors are staged in their own tile so a rejected gaussian only ever touches
+    # its geometry record. The blend reads the color slot on acceptance alone.
+    geo_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=_vec6, storage="shared")
+    color_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=wp.vec3, storage="shared")
+    done_tile = wp.tile_zeros(shape=1, dtype=wp.int32, storage="shared")
+    counted = wp.bool(False)
 
     for b in range(num_batches):
-        # whole-tile early-out vote, break once every thread in the block is done
-        done_count = wp.tile_sum(wp.tile(wp.where(done, 1, 0)))
-        if wp.tile_extract(done_count, 0) >= BLOCK_SIZE:
+        # Whole-tile early-out vote, break once every thread in the block is done.
+        # Each thread bumps the shared counter once, when it first turns done, so
+        # the counter never needs resetting. The scatter's barrier doubles as the
+        # guard between the previous batch's reads and this batch's staging writes.
+        wp.tile_scatter_add(done_tile, 0, 1, done and not counted)
+        counted = done
+        if done_tile[0] >= BLOCK_SIZE:
             break
 
+        # Per-thread gather of one gaussian record. Broadcast size-N attributes
+        # must be read at the local gid, batched size B*N ones at the flat id.
+        # Modulo by the array's own leading dim does both. The tail lanes of the
+        # last batch clamp to the final intersection, staging a duplicate record
+        # the blend loop never reads because it stops at batch_size.
         batch_start = range_start + b * BLOCK_SIZE
-        id_tile = wp.tile_load(
-            gaussian_ids_sorted, BLOCK_SIZE, offset=batch_start, storage="shared"
+        src = wp.min(batch_start + tr, range_end - 1)
+        g = gaussian_ids_sorted[src]
+        xy = xys[g]
+        conic = conics[g]
+        opac = opacities[g % opac_mod]
+        wp.tile_scatter_masked(
+            geo_tile, tr, _vec6(xy[0], xy[1], opac, conic[0], conic[1], conic[2]), True
         )
-        xy_tile = wp.tile_load_indexed(
-            xys, indices=id_tile, shape=(BLOCK_SIZE,), axis=0, storage="shared"
-        )
-        conic_tile = wp.tile_load_indexed(
-            conics, indices=id_tile, shape=(BLOCK_SIZE,), axis=0, storage="shared"
-        )
-        cid_tile = wp.tile_map(wp.mod, id_tile, wp.tile_full(BLOCK_SIZE, color_mod, dtype=wp.int32))
-        color_tile = wp.tile_load_indexed(
-            colors, indices=cid_tile, shape=(BLOCK_SIZE,), axis=0, storage="shared"
-        )
-        oid_tile = wp.tile_map(wp.mod, id_tile, wp.tile_full(BLOCK_SIZE, opac_mod, dtype=wp.int32))
-        opac_tile = wp.tile_load_indexed(
-            opacities, indices=oid_tile, shape=(BLOCK_SIZE,), axis=0, storage="shared"
-        )
+        wp.tile_scatter_masked(color_tile, tr, colors[g % color_mod], True)
 
         batch_size = wp.min(BLOCK_SIZE, range_end - batch_start)
         if not done:
             for t in range(batch_size):
-                conic = conic_tile[t]
-                xy = xy_tile[t]
-                opac = opac_tile[t]
-                dx = xy[0] - px
-                dy = xy[1] - py
-                sigma = 0.5 * (conic[0] * dx * dx + conic[2] * dy * dy) + conic[1] * dx * dy
-                alpha = wp.min(0.999, opac * wp.exp(-sigma))
+                s = geo_tile[t]
+                dx = s[0] - px
+                dy = s[1] - py
+                sigma = 0.5 * (s[3] * dx * dx + s[5] * dy * dy) + s[4] * dx * dy
+                alpha = wp.min(0.999, s[2] * wp.exp(-sigma))
                 if sigma < 0.0 or alpha < 1.0 / 255.0:
                     continue
                 next_T = T * (1.0 - alpha)
@@ -182,9 +192,10 @@ def _rasterize_fwd(
 # Depth-augmented forward. The expected-depth channel
 # D(p) = sum_i w_i d_i with the alpha-blend weights w_i, for sparse-point depth
 # regularization. A separate kernel so the default render never pays for the
-# extra accumulator and load. Blend math, early-exit vote, and batched indexing
-# are identical to _rasterize_fwd. Background depth is 0, so the depth channel
-# has no T*bg term.
+# extra accumulator and load. Blend math, early-exit vote, staging, and batched
+# indexing are identical to _rasterize_fwd, with depth packed next to color in
+# the acceptance-only tile. Background depth is 0, so the depth channel has no
+# T*bg term.
 @wp.kernel
 def _rasterize_fwd_depth(
     img_h: wp.int32,
@@ -235,43 +246,39 @@ def _rasterize_fwd_depth(
     pix_out = wp.vec3(0.0, 0.0, 0.0)
     depth_out = wp.float32(0.0)
 
+    geo_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=_vec6, storage="shared")
+    cd_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=wp.vec4, storage="shared")
+    done_tile = wp.tile_zeros(shape=1, dtype=wp.int32, storage="shared")
+    counted = wp.bool(False)
+
     for b in range(num_batches):
-        done_count = wp.tile_sum(wp.tile(wp.where(done, 1, 0)))
-        if wp.tile_extract(done_count, 0) >= BLOCK_SIZE:
+        wp.tile_scatter_add(done_tile, 0, 1, done and not counted)
+        counted = done
+        if done_tile[0] >= BLOCK_SIZE:
             break
 
         batch_start = range_start + b * BLOCK_SIZE
-        id_tile = wp.tile_load(
-            gaussian_ids_sorted, BLOCK_SIZE, offset=batch_start, storage="shared"
+        src = wp.min(batch_start + tr, range_end - 1)
+        g = gaussian_ids_sorted[src]
+        xy = xys[g]
+        conic = conics[g]
+        opac = opacities[g % opac_mod]
+        color = colors[g % color_mod]
+        wp.tile_scatter_masked(
+            geo_tile, tr, _vec6(xy[0], xy[1], opac, conic[0], conic[1], conic[2]), True
         )
-        xy_tile = wp.tile_load_indexed(
-            xys, indices=id_tile, shape=(BLOCK_SIZE,), axis=0, storage="shared"
-        )
-        conic_tile = wp.tile_load_indexed(
-            conics, indices=id_tile, shape=(BLOCK_SIZE,), axis=0, storage="shared"
-        )
-        depth_tile = wp.tile_load_indexed(
-            depths, indices=id_tile, shape=(BLOCK_SIZE,), axis=0, storage="shared"
-        )
-        cid_tile = wp.tile_map(wp.mod, id_tile, wp.tile_full(BLOCK_SIZE, color_mod, dtype=wp.int32))
-        color_tile = wp.tile_load_indexed(
-            colors, indices=cid_tile, shape=(BLOCK_SIZE,), axis=0, storage="shared"
-        )
-        oid_tile = wp.tile_map(wp.mod, id_tile, wp.tile_full(BLOCK_SIZE, opac_mod, dtype=wp.int32))
-        opac_tile = wp.tile_load_indexed(
-            opacities, indices=oid_tile, shape=(BLOCK_SIZE,), axis=0, storage="shared"
+        wp.tile_scatter_masked(
+            cd_tile, tr, wp.vec4(color[0], color[1], color[2], depths[g]), True
         )
 
         batch_size = wp.min(BLOCK_SIZE, range_end - batch_start)
         if not done:
             for t in range(batch_size):
-                conic = conic_tile[t]
-                xy = xy_tile[t]
-                opac = opac_tile[t]
-                dx = xy[0] - px
-                dy = xy[1] - py
-                sigma = 0.5 * (conic[0] * dx * dx + conic[2] * dy * dy) + conic[1] * dx * dy
-                alpha = wp.min(0.999, opac * wp.exp(-sigma))
+                s = geo_tile[t]
+                dx = s[0] - px
+                dy = s[1] - py
+                sigma = 0.5 * (s[3] * dx * dx + s[5] * dy * dy) + s[4] * dx * dy
+                alpha = wp.min(0.999, s[2] * wp.exp(-sigma))
                 if sigma < 0.0 or alpha < 1.0 / 255.0:
                     continue
                 next_T = T * (1.0 - alpha)
@@ -279,8 +286,9 @@ def _rasterize_fwd_depth(
                     done = wp.bool(True)
                     break
                 vis = alpha * T
-                pix_out = pix_out + color_tile[t] * vis
-                depth_out = depth_out + depth_tile[t] * vis
+                cd = cd_tile[t]
+                pix_out = pix_out + wp.vec3(cd[0], cd[1], cd[2]) * vis
+                depth_out = depth_out + cd[3] * vis
                 T = next_T
                 cur_idx = batch_start + t
 
