@@ -45,7 +45,7 @@ import jax.numpy as jnp
 import numpy as np
 import torch
 import warp as wp
-from bench_suite import (
+from bench_forward import (
     BATCHES,
     BUILDERS,
     CLIP_THRESH,

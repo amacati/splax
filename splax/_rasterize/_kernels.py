@@ -72,6 +72,10 @@ def _bucket_count(ni: int) -> int:
 # single shared write, and the whole record arrives with one shared read per
 # tested gaussian in the blend loop.
 _vec6 = wp.types.vector(length=6, dtype=wp.float32)
+# The depth forward stages depth inside the geometry record. A 7-float record also
+# avoids the shared-memory access pattern that made the previous 6-float-plus-vec4
+# tile split run 2x slower, see the kernel comment on _rasterize_fwd_depth.
+_vec7 = wp.types.vector(length=7, dtype=wp.float32)
 
 
 @wp.kernel
@@ -195,9 +199,11 @@ def _rasterize_fwd(
 # D(p) = sum_i w_i d_i with the alpha-blend weights w_i, for sparse-point depth
 # regularization. A separate kernel so the default render never pays for the
 # extra accumulator and load. Blend math, early-exit vote, staging, and batched
-# indexing are identical to _rasterize_fwd, with depth packed next to color in
-# the acceptance-only tile. Background depth is 0, so the depth channel has no
-# T*bg term.
+# indexing are identical to _rasterize_fwd, with depth packed into the geometry
+# record. The packing matters: staging depth in a second vec4 tile alongside a
+# vec6 geometry tile ran the whole kernel 2x slower than the plain color blend,
+# while the 7-float record restores parity with it (bit-identical output).
+# Background depth is 0, so the depth channel has no T*bg term.
 @wp.kernel
 def _rasterize_fwd_depth(
     img_h: wp.int32,
@@ -248,8 +254,8 @@ def _rasterize_fwd_depth(
     pix_out = wp.vec3(0.0, 0.0, 0.0)
     depth_out = wp.float32(0.0)
 
-    geo_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=_vec6, storage="shared")
-    cd_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=wp.vec4, storage="shared")
+    geo_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=_vec7, storage="shared")
+    color_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=wp.vec3, storage="shared")
     done_tile = wp.tile_zeros(shape=1, dtype=wp.int32, storage="shared")
     counted = wp.bool(False)
 
@@ -265,11 +271,10 @@ def _rasterize_fwd_depth(
         xy = xys[g]
         conic = conics[g]
         opac = opacities[g % opac_mod]
-        color = colors[g % color_mod]
         wp.tile_scatter_masked(
-            geo_tile, tr, _vec6(xy[0], xy[1], opac, conic[0], conic[1], conic[2]), True
+            geo_tile, tr, _vec7(xy[0], xy[1], opac, conic[0], conic[1], conic[2], depths[g]), True
         )
-        wp.tile_scatter_masked(cd_tile, tr, wp.vec4(color[0], color[1], color[2], depths[g]), True)
+        wp.tile_scatter_masked(color_tile, tr, colors[g % color_mod], True)
 
         batch_size = wp.min(BLOCK_SIZE, range_end - batch_start)
         if not done:
@@ -286,9 +291,8 @@ def _rasterize_fwd_depth(
                     done = wp.bool(True)
                     break
                 vis = alpha * T
-                cd = cd_tile[t]
-                pix_out = pix_out + wp.vec3(cd[0], cd[1], cd[2]) * vis
-                depth_out = depth_out + cd[3] * vis
+                pix_out = pix_out + color_tile[t] * vis
+                depth_out = depth_out + s[6] * vis
                 T = next_T
                 cur_idx = batch_start + t
 
