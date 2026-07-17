@@ -216,19 +216,6 @@ def _bits_for_count(count: int) -> int:
 _SCRATCH_HEADROOM = 1.25
 _scratch_cache: dict = {}
 
-# Cached post-sync CUDA graphs, see _rasterize._forward_graph. A graph records the addresses of the
-# scratch buffers, so any scratch reallocation makes every cached graph dangling and the cache must
-# be purged. Graphs are destroyed before the scratch refs drop, so each is torn down while the
-# buffers it recorded are still alive. The "gen" counter in each scratch entry bumps on every
-# sort-buffer reallocation and is part of the graph cache key.
-_graph_cache: dict = {}
-
-
-def clear_graph_cache() -> None:
-    """Release all cached post-sync CUDA graphs on all devices."""
-    _graph_cache.clear()
-
-
 # Recorded per-kernel launches, keyed on (kernel, device). Each entry is a
 # (wp.Launch, state) pair, where state holds the dim followed by one entry per
 # argument, arrays as (ptr, shape) and scalars by value. wp.launch resolves the
@@ -311,11 +298,6 @@ def _read_count_end(pending: tuple | int) -> int:
     return int(pending[1][0])
 
 
-def _read_count(src: wp.array, index: int, device: wp.Device | None) -> int:
-    """Read one int32 element back to the host."""
-    return _read_count_end(_read_count_begin(src, index, device))
-
-
 def _get_scratch(
     device: wp.Device | None,
     sig: tuple,
@@ -327,9 +309,8 @@ def _get_scratch(
     entry = _scratch_cache.get(key)
     if entry is None or entry["sig"] != sig:
         # New workload signature. Drop everything first so the peak is the new
-        # size, not old plus new. Purge the graphs and recorded launches first,
-        # they hold the old addresses and array references.
-        _graph_cache.clear()
+        # size, not old plus new. Purge the recorded launches first, they hold
+        # the old array references.
         _launch_cache.clear()
         _scratch_cache.pop(key, None)
         entry = {
@@ -340,15 +321,12 @@ def _get_scratch(
             "gaussian_ids": None,
             "tile_bins": wp.empty(bins_need, dtype=wp.vec2i, device=device),
             "depth_mm": wp.empty(2 * max(sig[0], 1), dtype=wp.float32, device=device),
-            "gen": 0,
         }
         _scratch_cache[key] = entry
     if entry["isect_cap"] < isect_need or entry["isect_dtype"] != isect_dtype:
         cap = max(int(isect_need * _SCRATCH_HEADROOM) + 1, entry["isect_cap"])
-        entry["gen"] += 1
-        # Sort buffers move on realloc, so graphs go stale and recorded launches
-        # must drop their references to the old buffers before the free below.
-        _graph_cache.clear()
+        # Sort buffers move on realloc, so recorded launches must drop their
+        # references to the old buffers before the free below.
         _launch_cache.clear()
         # Free before allocating larger, avoiding an old plus new transient peak.
         entry["isect_ids"] = None
@@ -366,10 +344,8 @@ def clear_scratch() -> None:
 
     The backend caches grow-only scratch across renders. Call this to reclaim that
     memory, for example before switching to a very different workload size. Also
-    purges the post-sync CUDA graph cache and the recorded launch cache, which
-    reference the freed scratch buffers.
+    purges the recorded launch cache, which references the freed scratch buffers.
     """
-    _graph_cache.clear()
     _launch_cache.clear()
     _scratch_cache.clear()
 
@@ -593,43 +569,6 @@ def _tile_bin_edges_32bit(
 
 
 @wp.kernel
-def _tile_bin_edges_32bit_dev(
-    count_arr: wp.array[wp.int32],
-    count_idx: wp.int32,
-    isect_ids_sorted: wp.array[wp.int32],
-    num_tiles: wp.int32,
-    tile_n_bits: wp.int32,
-    depth_bits: wp.int32,
-    # output
-    tile_bins: wp.array[wp.vec2i],
-):
-    # Device-count-guarded twin of _tile_bin_edges_32bit for the captured-graph
-    # path. The real intersection count is read from device memory
-    # (count_arr[count_idx] == cum_tiles_hit[total-1]) at replay time, not baked
-    # into the graph. The sort runs over the padded bucket with 0x7FFFFFFF
-    # sentinel keys at the tail, and this guard makes every thread past the real
-    # count return, so the writes are byte-identical to _tile_bin_edges_32bit
-    # launched at dim=count. The blend reads only real bins.
-    idx = wp.tid()
-    num_intersects = count_arr[count_idx]
-    if idx >= num_intersects:
-        return
-    mask = (wp.int32(1) << tile_n_bits) - wp.int32(1)
-    key = isect_ids_sorted[idx] >> depth_bits
-    cur_bin = (key >> tile_n_bits) * num_tiles + (key & mask)
-    if idx == 0:
-        tile_bins[cur_bin][0] = 0
-        return
-    if idx == num_intersects - 1:
-        tile_bins[cur_bin][1] = num_intersects
-    keyp = isect_ids_sorted[idx - 1] >> depth_bits
-    prev_bin = (keyp >> tile_n_bits) * num_tiles + (keyp & mask)
-    if prev_bin != cur_bin:
-        tile_bins[prev_bin][1] = idx
-        tile_bins[cur_bin][0] = idx
-
-
-@wp.kernel
 def _tile_bin_edges_64bit(
     num_intersects: wp.int32,
     isect_ids_sorted: wp.array[wp.int64],
@@ -675,17 +614,14 @@ def _sort_and_bin(
     B: int,
     tile_bounds_x: int,
     tile_bounds_y: int,
-    num_intersects: int | None = None,
 ) -> tuple[wp.array, wp.array, int]:
     """Emit sorted intersection keys and tile bins for one batched launch.
 
     Used by the forward blend and by the backward pass, which recomputes the
     identical sort from the saved cum_tiles_hit. The sort is deterministic, so it
     reproduces the forward gaussian_ids and tile_bins and the saved final_idx stays
-    valid. num_intersects may be passed in when the caller already read it back
-    (the graph eligibility check), avoiding a second host sync. Returns
-    (gaussian_ids, tile_bins, num_intersects), where gaussian_ids is the full
-    scratch buffer whose valid prefix is [0, num_intersects).
+    valid. Returns (gaussian_ids, tile_bins, num_intersects), where gaussian_ids is
+    the full scratch buffer whose valid prefix is [0, num_intersects).
     """
     num_tiles = tile_bounds_x * tile_bounds_y
     tile_n_bits = _bits_for_count(num_tiles)
@@ -707,18 +643,10 @@ def _sort_and_bin(
     # copy is enqueued first and the wait happens below, so the tile_bins memset
     # and the depth range pre-pass execute inside the sync bubble while the host
     # waits for the scan result.
-    pending = None
-    if num_intersects is None:
-        pending = _read_count_begin(cum_tiles_hit, total - 1, device)
+    pending = _read_count_begin(cum_tiles_hit, total - 1, device)
 
     isect_dtype = wp.int32 if packed else wp.int64
-    scratch = _get_scratch(
-        device,
-        (B, n, num_tiles),
-        2 if num_intersects is None else max(2 * num_intersects, 2),
-        bins_len,
-        isect_dtype,
-    )
+    scratch = _get_scratch(device, (B, n, num_tiles), 2, bins_len, isect_dtype)
     # tile_bins is allocated at exactly bins_len for this signature.
     tile_bins = scratch["tile_bins"]
     tile_bins.zero_()
@@ -734,12 +662,11 @@ def _sort_and_bin(
             device,
         )
 
-    if pending is not None:
-        num_intersects = _read_count_end(pending)
-        # Grow the sort buffers to the frame's count. Nothing above needs them.
-        scratch = _get_scratch(
-            device, (B, n, num_tiles), max(2 * num_intersects, 2), bins_len, isect_dtype
-        )
+    num_intersects = _read_count_end(pending)
+    # Grow the sort buffers to the frame's count. Nothing above needs them.
+    scratch = _get_scratch(
+        device, (B, n, num_tiles), max(2 * num_intersects, 2), bins_len, isect_dtype
+    )
 
     if num_intersects == 0:
         return scratch["gaussian_ids"], tile_bins, 0

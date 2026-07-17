@@ -1,9 +1,9 @@
 """Build the splax vs gsplat benchmark suite report as a multi-page PDF.
 
-Reads ``reports/benchmark_suite.json`` written by ``bench_suite.py`` and renders a
+Reads ``reports/benchmark_suite.json`` written by ``bench_forward.py`` and renders a
 cover page with the run metadata, one page per scenario with render time, throughput,
 and peak-memory curves plus a sample render, and a summary page tabulating the speedup
-and memory ratios. The JSON is the source of truth; this module only draws it.
+and memory ratios. The JSON is the source of truth, this module only draws it.
 
     pixi run -e tests python benchmark/suite_report.py
 """
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,8 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
+
+logger = logging.getLogger(__name__)
 
 SPLAX_C = "#1b9e77"
 GSPLAT_C = "#d95f02"
@@ -52,7 +55,6 @@ def cover_page(pdf: PdfPages, data: dict) -> None:
         f"GPU: {meta['gpu']}",
         f"jax {meta['jax_version']}   gsplat {meta['gsplat_version']}   "
         f"torch {meta['torch_version']}",
-        f"JAX preallocation off: {meta['no_jax_preallocation']}",
         f"warmup {meta['warmup']}, iters {meta['iters']}, best of {meta['repeat']}",
         f"batches: {', '.join(str(b) for b in meta['batches'])}",
         f"metric: {meta['metric']}",
@@ -209,13 +211,14 @@ def build_report(data: dict, out: Path) -> None:
 
 def main() -> None:
     """Build the PDF from an existing benchmark JSON."""
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--json", type=Path, default=OUT_DIR / "benchmark_suite.json")
     ap.add_argument("--out", type=Path, default=OUT_DIR / "benchmark_suite.pdf")
     args = ap.parse_args()
     data = json.loads(args.json.read_text())
     build_report(data, args.out)
-    print(f"wrote {args.out}")
+    logger.info(f"wrote {args.out}")
 
 
 if __name__ == "__main__":

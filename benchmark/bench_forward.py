@@ -24,7 +24,7 @@ Writes ``reports/benchmark_suite.json`` (the machine-readable basis of the repor
 one sample splax render per scenario under ``reports/benchmark_assets/``. Run the
 report generator afterwards, or pass ``--report`` to build the PDF in the same call.
 
-    pixi run -e tests python benchmark/bench_suite.py
+    pixi run -e tests python benchmark/bench_forward.py
 """
 
 from __future__ import annotations
@@ -37,6 +37,10 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import argparse
 import json
+import logging
+import subprocess
+import sys
+import tempfile
 import timeit
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -49,11 +53,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
+from suite_report import build_report
 
 import splax
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
 
 REPO = Path(__file__).resolve().parent.parent
 OUT_DIR = REPO / "reports"
@@ -96,28 +103,25 @@ class Scenario:
     focal: float
 
 
-# --------------------------------------------------------------------------- cameras
-
-
-def _normalize(v: np.ndarray) -> np.ndarray:
-    return v / (np.linalg.norm(v) + 1e-12)
+# region cameras
 
 
 def look_at(eye: np.ndarray, target: np.ndarray, up: np.ndarray | None = None) -> np.ndarray:
     """World-to-camera OpenCV matrix looking from ``eye`` to ``target``.
 
-    The camera looks along +z toward the target. ``up`` picks the world up axis; when
+    The camera looks along +z toward the target. ``up`` picks the world up axis. When
     omitted it defaults to +y, or +z if the view direction is nearly vertical. Roll
     about the view axis only rotates the image and leaves render cost unchanged.
     """
-    z = _normalize(target - eye)
+    z = target - eye
+    z = z / (np.linalg.norm(z) + 1e-12)
     if up is None:
         up = np.array([0.0, 1.0, 0.0]) if abs(z[1]) < 0.95 else np.array([0.0, 0.0, 1.0])
     # x = right, y = down, so image up (-y) aligns with the world up axis.
     x = np.cross(z, up)
     if np.linalg.norm(x) < 1e-6:  # view direction parallel to up, pick another axis
         x = np.cross(z, np.array([1.0, 0.0, 0.0]))
-    x = _normalize(x)
+    x = x / (np.linalg.norm(x) + 1e-12)
     y = np.cross(z, x)
     c2w = np.eye(4)
     c2w[:3, 0], c2w[:3, 1], c2w[:3, 2], c2w[:3, 3] = x, y, z, eye
@@ -203,7 +207,7 @@ def nerf_camera(frame: dict) -> np.ndarray:
     return np.linalg.inv(c2w).astype(np.float32)
 
 
-# --------------------------------------------------------------------------- scenes
+# region scenes
 
 
 def build_synthetic(n: int, clusters: int, res: int, seed: int) -> Scenario:
@@ -268,7 +272,7 @@ def build_hf(res: int) -> Scenario:
     )
 
 
-# --------------------------------------------------------------------------- runners
+# region runners
 
 
 def bench(call: Callable[[], object], iters: int) -> float:
@@ -276,11 +280,11 @@ def bench(call: Callable[[], object], iters: int) -> float:
     return min(timeit.Timer(call).repeat(repeat=REPEAT, number=iters)) / iters
 
 
-def make_splax(sc: Scenario, batch: int) -> tuple[Callable[[], object], jax.Array, Callable]:
+def make_splax(sc: Scenario, batch: int) -> tuple[Callable[[], object], Callable]:
     """Build a jitted vmapped splax render over ``batch`` viewmats.
 
-    Returns the timed call, the viewmat batch, and the jitted render itself so the
-    caller can read its jit cache size and render a sample.
+    Returns the timed call and the jitted render itself so the caller can read its jit
+    cache size and render a sample.
     """
     means, scales, quats, colors, opacities, background = sc.scene
     res, focal = sc.res, sc.focal
@@ -305,7 +309,7 @@ def make_splax(sc: Scenario, batch: int) -> tuple[Callable[[], object], jax.Arra
 
         return jax.vmap(one)(vm)
 
-    return lambda: jax.block_until_ready(render(views)), views, render
+    return lambda: jax.block_until_ready(render(views)), render
 
 
 def make_gsplat(sc: Scenario, batch: int) -> Callable[[], object]:
@@ -349,7 +353,7 @@ def make_gsplat(sc: Scenario, batch: int) -> Callable[[], object]:
 
 def save_sample(sc: Scenario) -> str:
     """Render view 0 with splax and save a PNG thumbnail, return its relative path."""
-    call, _views, render = make_splax(sc, 1)
+    _, render = make_splax(sc, 1)
     img = np.asarray(render(jnp.asarray(sc.viewmats[:1]))[0])
     img = (np.clip(img, 0.0, 1.0) * 255).astype(np.uint8)
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
@@ -358,20 +362,18 @@ def save_sample(sc: Scenario) -> str:
     return rel
 
 
-def jax_stats() -> dict:
-    return jax.devices()[0].memory_stats()
-
-
 def run_scenario(sc: Scenario) -> dict:
     """Sweep the batch for one scenario, timing both frameworks and their peak memory."""
     n = sc.scene[0].shape[0]
-    print(f"\n== {sc.name}: {n:,} gaussians, {sc.res}x{sc.res}, focal {sc.focal:.1f} ==")
-    print(f"{'batch':>6} {'splax ms':>9} {'gsplat ms':>10} {'sp MB':>8} {'gs MB':>8} {'g/s':>6}")
+    logger.info(f"\n== {sc.name}: {n:,} gaussians, {sc.res}x{sc.res}, focal {sc.focal:.1f} ==")
+    logger.info(
+        f"{'batch':>6} {'splax ms':>9} {'gsplat ms':>10} {'sp MB':>8} {'gs MB':>8} {'g/s':>6}"
+    )
 
     sample = save_sample(sc)
     rows = []
     for batch in BATCHES:
-        splax_call, views, render = make_splax(sc, batch)
+        splax_call, render = make_splax(sc, batch)
         gsplat_call = make_gsplat(sc, batch)
 
         for _ in range(WARMUP):
@@ -381,7 +383,7 @@ def run_scenario(sc: Scenario) -> dict:
         assert cache == 1, f"expected 1 splax jit cache entry, got {cache}"
 
         splax_ms = bench(splax_call, ITERS) * 1e3
-        splax_peak = int(jax_stats().get("peak_bytes_in_use", 0))
+        splax_peak = int(jax.devices()[0].memory_stats().get("peak_bytes_in_use", 0))
 
         torch.cuda.reset_peak_memory_stats()
         gsplat_ms = bench(gsplat_call, ITERS) * 1e3
@@ -403,7 +405,7 @@ def run_scenario(sc: Scenario) -> dict:
             "mem_ratio_splax_over_gsplat": splax_peak / gsplat_peak if gsplat_peak else None,
         }
         rows.append(row)
-        print(
+        logger.info(
             f"{batch:>6} {splax_ms:>9.3f} {gsplat_ms:>10.3f} "
             f"{splax_peak / 1e6:>8.1f} {gsplat_peak / 1e6:>8.1f} "
             f"{gsplat_ms / splax_ms:>6.2f}"
@@ -441,10 +443,7 @@ def run_worker(scene: str, frag: Path) -> None:
 
 def main() -> None:
     """Run every scenario in isolated subprocesses, write the JSON, build the PDF."""
-    import subprocess
-    import sys
-    import tempfile
-
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--scenes", nargs="+", default=["synthetic", "lego", "hf"], help="subset of scenes to run"
@@ -476,7 +475,6 @@ def main() -> None:
             "jax_version": jax.__version__,
             "gsplat_version": gsplat.__version__,
             "torch_version": torch.__version__,
-            "no_jax_preallocation": os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE") == "false",
             "warmup": WARMUP,
             "iters": ITERS,
             "repeat": REPEAT,
@@ -485,25 +483,25 @@ def main() -> None:
             "memory_note": (
                 "Peak GPU bytes from each framework's own allocator, measured "
                 "independently. splax (JAX) is the process cumulative peak after the "
-                "ascending batch sweep; gsplat (torch) is reset per batch. JAX "
+                "ascending batch sweep, gsplat (torch) is reset per batch. JAX "
                 "preallocation is off. The two are separate pools and not strictly "
-                "comparable in absolute terms (CUDA context and kernel workspace "
-                "accounting differ), but each tracks its own workload."
+                "comparable in absolute terms since CUDA context and kernel workspace "
+                "accounting differ, but each tracks its own workload."
             ),
         },
         "scenarios": scenarios,
     }
     out = OUT_DIR / "benchmark_suite.json"
     out.write_text(json.dumps(data, indent=2))
-    print(f"\nwrote {out}")
+    logger.info(f"\nwrote {out}")
 
     if args.report:
-        from suite_report import build_report
-
         pdf = OUT_DIR / "benchmark_suite.pdf"
         build_report(data, pdf)
-        print(f"wrote {pdf}")
+        logger.info(f"wrote {pdf}")
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.getLogger("jax").setLevel(logging.WARNING)
     main()

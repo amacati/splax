@@ -8,7 +8,7 @@ through its native camera-batch rasterization with a CUDA synchronize inside the
 
 Writes ``reports/bench_backward.json``.
 
-    pixi run -e tests python benchmark/bench_backward.py [--variants explicit autodiff]
+    pixi run -e tests python benchmark/bench_backward.py
 """
 
 from __future__ import annotations
@@ -19,7 +19,10 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import argparse
 import json
+import logging
 import subprocess
+import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -40,7 +43,6 @@ from bench_forward import (
     WARMUP,
     Scenario,
     bench,
-    jax_stats,
 )
 
 import splax
@@ -48,10 +50,10 @@ import splax
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+logger = logging.getLogger(__name__)
+
 REPO = Path(__file__).resolve().parent.parent
 OUT_DIR = REPO / "reports"
-
-VARIANTS = ["explicit", "autodiff"]
 
 
 def _target(sc: Scenario, batch: int) -> np.ndarray:
@@ -163,17 +165,11 @@ def nvml_used_bytes() -> int:
     return 0
 
 
-def run_scenario(sc: Scenario, variant: str) -> dict:
-    """Sweep the batch for one scenario and one splax variant.
-
-    gsplat is only benchmarked alongside the explicit variant, its numbers do not
-    depend on the splax backward implementation.
-    """
+def run_scenario(sc: Scenario) -> dict:
+    """Sweep the batch for one scenario, timing both frameworks and their peak memory."""
     n = sc.scene[0].shape[0]
-    with_gsplat = variant == "explicit"
-    label = f"splax-{variant}"
-    print(f"\n== {sc.name} [{variant}]: {n:,} gaussians, {sc.res}x{sc.res} ==")
-    print(f"{'batch':>6} {label + ' ms':>16} {'gsplat ms':>10} {'sp MB':>8} {'gs MB':>8}")
+    logger.info(f"\n== {sc.name}: {n:,} gaussians, {sc.res}x{sc.res} ==")
+    logger.info(f"{'batch':>6} {'splax ms':>9} {'gsplat ms':>10} {'sp MB':>8} {'gs MB':>8}")
 
     device = wp.get_device()
     rows = []
@@ -185,50 +181,45 @@ def run_scenario(sc: Scenario, variant: str) -> dict:
         assert cache == 1, f"expected 1 splax jit cache entry, got {cache}"
 
         splax_ms = bench(splax_call, ITERS) * 1e3
-        jax_peak = int(jax_stats().get("peak_bytes_in_use", 0))
+        jax_peak = int(jax.devices()[0].memory_stats().get("peak_bytes_in_use", 0))
         warp_peak = int(wp.get_mempool_used_mem_high(device))
         splax_peak = jax_peak + warp_peak
 
-        row: dict = {
-            "batch": batch,
-            "splax": {
-                "variant": variant,
-                "time_ms": splax_ms,
-                "throughput_ips": batch / (splax_ms / 1e3),
-                "peak_bytes": splax_peak,
-                "jax_peak_bytes": jax_peak,
-                "warp_peak_bytes": warp_peak,
-                "nvml_used_bytes": nvml_used_bytes(),
-            },
-        }
+        gsplat_call = make_gsplat_step(sc, batch)
+        for _ in range(WARMUP):
+            gsplat_call()
+        torch.cuda.reset_peak_memory_stats()
+        gsplat_ms = bench(gsplat_call, ITERS) * 1e3
+        gsplat_peak = int(torch.cuda.max_memory_allocated())
 
-        gsplat_ms = float("nan")
-        gsplat_peak = 0
-        if with_gsplat:
-            gsplat_call = make_gsplat_step(sc, batch)
-            for _ in range(WARMUP):
-                gsplat_call()
-            torch.cuda.reset_peak_memory_stats()
-            gsplat_ms = bench(gsplat_call, ITERS) * 1e3
-            gsplat_peak = int(torch.cuda.max_memory_allocated())
-            row["gsplat"] = {
-                "time_ms": gsplat_ms,
-                "throughput_ips": batch / (gsplat_ms / 1e3),
-                "peak_bytes": gsplat_peak,
-                "nvml_used_bytes": nvml_used_bytes(),
+        rows.append(
+            {
+                "batch": batch,
+                "splax": {
+                    "time_ms": splax_ms,
+                    "throughput_ips": batch / (splax_ms / 1e3),
+                    "peak_bytes": splax_peak,
+                    "jax_peak_bytes": jax_peak,
+                    "warp_peak_bytes": warp_peak,
+                    "nvml_used_bytes": nvml_used_bytes(),
+                },
+                "gsplat": {
+                    "time_ms": gsplat_ms,
+                    "throughput_ips": batch / (gsplat_ms / 1e3),
+                    "peak_bytes": gsplat_peak,
+                    "nvml_used_bytes": nvml_used_bytes(),
+                },
+                "speedup_gsplat_over_splax": gsplat_ms / splax_ms,
+                "mem_ratio_splax_over_gsplat": splax_peak / gsplat_peak if gsplat_peak else None,
             }
-            row["speedup_gsplat_over_splax"] = gsplat_ms / splax_ms
-            row["mem_ratio_splax_over_gsplat"] = splax_peak / gsplat_peak if gsplat_peak else None
-
-        rows.append(row)
-        print(
-            f"{batch:>6} {splax_ms:>16.3f} {gsplat_ms:>10.3f} "
+        )
+        logger.info(
+            f"{batch:>6} {splax_ms:>9.3f} {gsplat_ms:>10.3f} "
             f"{splax_peak / 1e6:>8.1f} {gsplat_peak / 1e6:>8.1f}"
         )
 
     return {
         "name": sc.name,
-        "variant": variant,
         "n_gaussians": int(n),
         "img_shape": [sc.res, sc.res],
         "focal": sc.focal,
@@ -236,77 +227,37 @@ def run_scenario(sc: Scenario, variant: str) -> dict:
     }
 
 
-def run_worker(scene: str, variant: str, frag: Path) -> None:
-    """Benchmark one (scenario, variant) pair in this process."""
-    result = run_scenario(BUILDERS[scene](), variant)
+def run_worker(scene: str, frag: Path) -> None:
+    """Benchmark one scenario in this process and write its result dict to ``frag``."""
+    result = run_scenario(BUILDERS[scene]())
     frag.write_text(json.dumps(result))
 
 
 def main() -> None:
-    """Run every (scene, variant) pair in isolated subprocesses and merge the JSON."""
-    import subprocess
-    import sys
-    import tempfile
-
+    """Run every scenario in an isolated subprocess and merge the JSON."""
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--scenes", nargs="+", default=["synthetic", "lego", "hf"], help="subset of scenes"
     )
-    parser.add_argument(
-        "--variants",
-        nargs="+",
-        default=["explicit"],
-        choices=VARIANTS,
-        help="splax backward variants to benchmark",
-    )
     parser.add_argument("--worker", help=argparse.SUPPRESS)
-    parser.add_argument("--variant", default="explicit", help=argparse.SUPPRESS)
     parser.add_argument("--frag", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args.worker:
-        run_worker(args.worker, args.variant, args.frag)
+        run_worker(args.worker, args.frag)
         return
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    scenarios: dict[str, dict] = {}
+    scenarios = []
     for name in args.scenes:
-        for variant in args.variants:
-            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
-                frag = Path(tmp.name)
-            subprocess.run(
-                [
-                    sys.executable,
-                    __file__,
-                    "--worker",
-                    name,
-                    "--variant",
-                    variant,
-                    "--frag",
-                    str(frag),
-                ],
-                check=True,
-            )
-            result = json.loads(frag.read_text())
-            frag.unlink(missing_ok=True)
-            sc = scenarios.setdefault(
-                name,
-                {
-                    "name": name,
-                    "n_gaussians": result["n_gaussians"],
-                    "img_shape": result["img_shape"],
-                    "focal": result["focal"],
-                    "rows": [{"batch": b} for b in BATCHES],
-                },
-            )
-            for row, res_row in zip(sc["rows"], result["rows"]):
-                if variant == "explicit":
-                    row["splax"] = res_row["splax"]
-                    row["gsplat"] = res_row["gsplat"]
-                    row["speedup_gsplat_over_splax"] = res_row["speedup_gsplat_over_splax"]
-                    row["mem_ratio_splax_over_gsplat"] = res_row["mem_ratio_splax_over_gsplat"]
-                else:
-                    row[f"splax_{variant}"] = res_row["splax"]
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+            frag = Path(tmp.name)
+        subprocess.run(
+            [sys.executable, __file__, "--worker", name, "--frag", str(frag)], check=True
+        )
+        scenarios.append(json.loads(frag.read_text()))
+        frag.unlink(missing_ok=True)
 
     data = {
         "meta": {
@@ -319,7 +270,6 @@ def main() -> None:
             "warmup": WARMUP,
             "iters": ITERS,
             "batches": BATCHES,
-            "variants": args.variants,
             "metric": (
                 "one training step (forward + backward of a scalar L2 loss against a "
                 "fixed random target, grads wrt means/scales/quats/colors/opacities), "
@@ -334,11 +284,11 @@ def main() -> None:
                 "a ground-truth cross-check that also covers the CUDA context."
             ),
         },
-        "scenarios": list(scenarios.values()),
+        "scenarios": scenarios,
     }
     out = OUT_DIR / "bench_backward.json"
     out.write_text(json.dumps(data, indent=2))
-    print(f"\nwrote {out}")
+    logger.info(f"\nwrote {out}")
 
 
 if __name__ == "__main__":

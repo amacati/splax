@@ -1,9 +1,9 @@
 """Warp rasterization kernels and their JAX FFI callables.
 
 This module holds the GPU side of the rasterization stage: the tiled front-to-back blend kernels
-(plain and depth-augmented), their backward twins, the shared sort and bin build, and the opt-in
-post-sync CUDA graph path. The host-side ``_*_launch`` functions are wrapped into JAX FFI callables
-that the API layer in ``splax._rasterize`` composes with ``jax.custom_vjp``.
+(plain and depth-augmented), their backward twins, and the shared sort and bin build. The host-side
+``_*_launch`` functions are wrapped into JAX FFI callables that the API layer in
+``splax._rasterize`` composes with ``jax.custom_vjp``.
 
 Batching is native. Under jax.vmap the callable launches a single grid over the whole batch. The
 image index is decoded from the block rank, packed into the sort key, and used to offset per-image
@@ -13,59 +13,15 @@ data-dependent scratch, the forward callable is not CUDA-graph capturable, so gr
 
 from __future__ import annotations
 
-import math
-import os
-from typing import cast
-
 import warp as wp
 from warp import JaxCallableGraphMode, jax_callable
 
 from splax._batching import nested_vmap
-from splax._intersect import (
-    _MINMAX_CHUNK,
-    BLOCK_SIZE,
-    BLOCK_WIDTH,
-    _bits_for_count,
-    _cached_launch,
-    _depth_minmax,
-    _get_scratch,
-    _graph_cache,
-    _map_intersects_32bit,
-    _read_count,
-    _seed_minmax,
-    _sort_and_bin,
-    _tile_bin_edges_32bit_dev,
-    _use_32bit_keys,
-)
+from splax._intersect import BLOCK_SIZE, BLOCK_WIDTH, _cached_launch, _sort_and_bin
 
 # Compile with approximate transcendentals and fp contraction, matching the CUDA reference's
 # -use_fast_math build flag.
 wp.set_module_options({"fast_math": True})
-
-# Post-sync CUDA graph capture, opt-in. Captures the whole
-# post-readback sequence (sentinel fill, depth minmax, map, sort, bin, blend) as
-# a cached CUDA graph and replays it, collapsing ~11 device launches into one
-# replay. Recovers the per-frame launch overhead on small and mid forward
-# renders (+5.6 to +21.6 percent end to end, bit-identical output). Above the
-# count threshold the bucket pad tax on the dominant sort eats the launch win,
-# so large frames fall back to plain launches. Default off because graph capture
-# inside the callback corrupts the CUDA context when the process concurrently
-# drives foreign CUDA graph or stream work. It is safe under the jitted,
-# splax-only production path. Packed-key forward path only.
-#   SPLAX_POSTSYNC_GRAPHS=1   enable
-#   SPLAX_GRAPH_THRESHOLD=N   max num_intersects to use a graph (default 2000000)
-_POSTSYNC_GRAPHS = os.environ.get("SPLAX_POSTSYNC_GRAPHS", "0") == "1"
-_GRAPH_THRESHOLD = int(os.environ.get("SPLAX_GRAPH_THRESHOLD", "2000000"))
-_GRAPH_BUCKET_STEP = 1.05  # geometric bucket granularity, ~5 percent pad worst case
-
-
-def _bucket_count(ni: int) -> int:
-    """Round num_intersects up to the next ~5 percent geometric step."""
-    if ni <= 1:
-        return max(ni, 1)
-    k = math.ceil(math.log(ni) / math.log(_GRAPH_BUCKET_STEP))
-    return max(ni, int(math.ceil(_GRAPH_BUCKET_STEP**k)))
-
 
 # One staged gaussian record: xy (2), opacity (1), conic (3). Packing every field
 # the alpha test needs into one vector lets a thread stage its gaussian with a
@@ -317,12 +273,10 @@ def _blend_setup(
     B_geom: int,
     img_h: int,
     img_w: int,
-    num_intersects: int | None = None,
 ) -> tuple[wp.array, wp.array, int, int, int]:
     """Tile geometry plus the shared sort and bin build.
 
     B_geom is the geometry batch, how many distinct renders the sort covers.
-    num_intersects may be passed in when the caller already read it back.
     Returns (gaussian_ids, tile_bins, num_intersects, tile_bounds_x, num_tiles).
     """
     bw = int(BLOCK_WIDTH)
@@ -340,187 +294,8 @@ def _blend_setup(
         B_geom,
         tile_bounds_x,
         tile_bounds_y,
-        num_intersects,
     )
     return (gaussian_ids, tile_bins, num_intersects, tile_bounds_x, tile_bounds_x * tile_bounds_y)
-
-
-def _forward_graph(
-    colors: wp.array,
-    opacities: wp.array,
-    map_opacities: wp.array,
-    background: wp.array,
-    xys: wp.array,
-    depths: wp.array,
-    radii: wp.array,
-    conics: wp.array,
-    cum_tiles_hit: wp.array,
-    n: int,
-    B: int,
-    img_h: int,
-    img_w: int,
-    tile_bounds_x: int,
-    tile_bounds_y: int,
-    sel_bg: bool,
-    final_Ts: wp.array2d[wp.float32],
-    final_idx: wp.array2d[wp.int32],
-    out_img: wp.array2d[wp.vec3],
-) -> tuple[bool, int | None]:
-    """Captured-graph forward path.
-
-    Returns (handled, num_intersects). handled is True if a graph replayed the
-    frame. When False the caller runs the plain path, reusing the returned count
-    so the host readback happens exactly once.
-
-    Reads num_intersects, buckets it, and either replays a cached CUDA graph or
-    captures one covering the whole post-sync sequence. Byte-identical to the
-    plain packed path. The sort runs over the padded bucket with 0x7FFFFFFF
-    sentinels sorted to the tail, and the bin kernel guards on the device-side
-    real count re-read at replay, so no sentinel is ever binned.
-
-    Falls back unless the packed key layout applies and 0 < num_intersects <
-    _GRAPH_THRESHOLD.
-    """
-    num_tiles = tile_bounds_x * tile_bounds_y
-    device = colors.device
-    assert device is not None  # colors is always a live device array here
-    # Never nest a capture inside an existing one. If the callback runs while the
-    # stream is already being captured, our capture_begin would conflict and
-    # corrupt the context. Fall back to plain launches and let the caller do its
-    # own readback, a host sync is illegal during capture.
-    if device.is_capturing:
-        return False, None
-    tile_n_bits = _bits_for_count(num_tiles)
-    image_n_bits = _bits_for_count(B)
-    depth_bits = 31 - (image_n_bits + tile_n_bits)
-    packed = _use_32bit_keys(depth_bits)
-    total = B * n
-    # The single host readback, reused by the caller's plain path on a fallback.
-    num_intersects = _read_count(cum_tiles_hit, total - 1, device)
-    if not packed or num_intersects <= 0 or num_intersects >= _GRAPH_THRESHOLD:
-        return False, num_intersects
-
-    bucket = _bucket_count(num_intersects)
-    bins_len = B * num_tiles
-    scratch = _get_scratch(device, (B, n, num_tiles), 2 * bucket, bins_len, wp.int32)
-    isect_ids = scratch["isect_ids"]
-    gaussian_ids = scratch["gaussian_ids"]
-    tile_bins = scratch["tile_bins"][:bins_len]
-    depth_mm = scratch["depth_mm"]
-    gen = scratch["gen"]
-
-    def run() -> None:
-        tile_bins.zero_()
-        # Sentinel-fill the sort range. The map kernel overwrites the real
-        # [0, count) prefix (its write count is data-dependent via cum_tiles_hit,
-        # re-read at replay), leaving the tail as 0x7FFFFFFF, which sorts last.
-        isect_ids[:bucket].fill_(0x7FFFFFFF)
-        wp.launch(_seed_minmax, dim=B, inputs=[depth_mm], device=device)
-        wp.launch(
-            _depth_minmax,
-            dim=(total + int(_MINMAX_CHUNK) - 1) // int(_MINMAX_CHUNK),
-            inputs=[depths, radii, total, n, depth_mm],
-            device=device,
-        )
-        wp.launch(
-            _map_intersects_32bit,
-            dim=total,
-            inputs=[
-                xys,
-                depths,
-                radii,
-                conics,
-                map_opacities,
-                cum_tiles_hit,
-                depth_mm,
-                n,
-                map_opacities.shape[0],
-                tile_n_bits,
-                depth_bits,
-                tile_bounds_x,
-                tile_bounds_y,
-            ],
-            outputs=[isect_ids[: 2 * bucket], gaussian_ids[: 2 * bucket]],
-            device=device,
-        )
-        wp.utils.radix_sort_pairs(isect_ids[: 2 * bucket], gaussian_ids[: 2 * bucket], bucket)
-        wp.launch(
-            _tile_bin_edges_32bit_dev,
-            dim=bucket,
-            inputs=[
-                cum_tiles_hit,
-                total - 1,
-                isect_ids[: 2 * bucket],
-                num_tiles,
-                tile_n_bits,
-                depth_bits,
-            ],
-            outputs=[tile_bins],
-            device=device,
-        )
-        wp.launch_tiled(
-            _rasterize_fwd,
-            dim=[B * num_tiles],
-            inputs=[
-                img_h,
-                img_w,
-                tile_bounds_x,
-                num_tiles,
-                colors.shape[0],
-                opacities.shape[0],
-                sel_bg,
-                gaussian_ids[: 2 * bucket],
-                tile_bins,
-                xys,
-                conics,
-                colors,
-                opacities,
-                background,
-            ],
-            outputs=[final_Ts, final_idx, out_img],
-            block_dim=int(BLOCK_SIZE),
-            device=device,
-        )
-
-    # A graph records buffer addresses, so the key carries every operand pointer
-    # plus the scratch generation. .ptr is already an int for live device arrays.
-    key = (
-        str(device),
-        B,
-        n,
-        num_tiles,
-        img_h,
-        img_w,
-        colors.shape[0],
-        opacities.shape[0],
-        map_opacities.shape[0],
-        sel_bg,
-        bucket,
-        gen,
-        xys.ptr,
-        depths.ptr,
-        radii.ptr,
-        conics.ptr,
-        cum_tiles_hit.ptr,
-        colors.ptr,
-        opacities.ptr,
-        map_opacities.ptr,
-        background.ptr,
-        cast("wp.array", out_img).ptr,
-        cast("wp.array", final_Ts).ptr,
-        cast("wp.array", final_idx).ptr,
-    )
-    graph = _graph_cache.get(key)
-    if graph is None:
-        run()  # warm run loads modules and allocates cub temp before capture
-        wp.capture_begin(device, force_module_load=False)
-        try:
-            run()
-        finally:
-            graph = wp.capture_end(device)
-        _graph_cache[key] = graph
-    wp.capture_launch(graph)
-    return True, num_intersects
 
 
 def _rasterize_launch(
@@ -548,43 +323,11 @@ def _rasterize_launch(
     B = out_img.shape[0] // img_h
     sel_bg = background.shape[0] > 1
 
-    # Post-sync CUDA graph fast path, opt-in. Replays the whole
-    # map/sort/bin/blend as one cached graph. On a fallback the readback is
-    # reused so the host sync happens exactly once.
-    ni_pre = None
-    if _POSTSYNC_GRAPHS:
-        bw = int(BLOCK_WIDTH)
-        tbx = (img_w + bw - 1) // bw
-        tby = (img_h + bw - 1) // bw
-        handled, ni_pre = _forward_graph(
-            colors,
-            opacities,
-            map_opacities,
-            background,
-            xys,
-            depths,
-            radii,
-            conics,
-            cum_tiles_hit,
-            n,
-            B,
-            img_h,
-            img_w,
-            tbx,
-            tby,
-            sel_bg,
-            final_Ts,
-            final_idx,
-            out_img,
-        )
-        if handled:
-            return
-
     # Key emission uses map_opacities, the raw opacity projection counted with.
     # The blend uses opacities, compensated in antialiased mode. When not
     # antialiased the caller passes the same array for both.
     gaussian_ids, tile_bins, _num_isect, tile_bounds_x, num_tiles = _blend_setup(
-        colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B, img_h, img_w, ni_pre
+        colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B, img_h, img_w
     )
 
     _cached_launch(
