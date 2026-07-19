@@ -82,8 +82,7 @@ def orbit(
     """
     phi = np.linspace(0.0, 2.0 * np.pi, n, endpoint=False)
     eyes = center + radius * np.stack([np.cos(phi), np.sin(phi), np.zeros(n)], axis=1)
-    up = np.array([0.0, 0.0, 1.0])
-    viewmats = np.stack([splax.utils.look_at(eye, center, up) for eye in eyes])
+    viewmats = splax.utils.look_at(eyes, center, up=(0, 0, 1))
     return viewmats, float(0.5 * res / np.tan(np.radians(fov_deg / 2.0)))
 
 
@@ -114,7 +113,7 @@ def build_lego() -> Scene:
     scene = (means, scales, quats, colors, opacities, jnp.ones(3))
     tf = json.loads(LEGO_TF.read_text())
     focal = 0.5 * LEGO_RES / np.tan(0.5 * tf["camera_angle_x"])
-    viewmats = np.stack([splax.utils.nerf_camera(f) for f in tf["frames"]])
+    viewmats = splax.utils.nerf_camera([f["transform_matrix"] for f in tf["frames"]])
     viewmats = np.resize(viewmats, (max(BATCHES), 4, 4))  # repeat to max batch
     description = f"Trained lego splat ({means.shape[0]:,} splats), "
     description += f"{viewmats.shape[0]} real held-out test cameras."

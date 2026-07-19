@@ -7,21 +7,39 @@ from scipy.spatial.transform import RigidTransform
 
 
 def look_at(eye: np.ndarray, target: np.ndarray, up: tuple | np.ndarray = (0, 1, 0)) -> np.ndarray:
-    """World-to-camera OpenCV matrix looking from ``eye`` to ``target``.
+    """Generate world-to-camera OpenCV matrices looking from ``eye`` to ``target``.
 
-    ``up`` picks the world up axis and must not be parallel to the view direction.
+    Args:
+        eye: (..., 3) camera positions in world coordinates.
+        target: (..., 3) camera targets, broadcastable against ``eye``.
+        up: World up direction, must not be parallel to the view direction.
+
+    Returns:
+        (..., 4, 4) float32 world-to-camera matrices, at most one batch dimension.
     """
-    assert np.linalg.norm(target - eye) > 0, "eye and target must differ"
-    z = (target - eye) / np.linalg.norm(target - eye)
+    z = target - eye
+    norm = np.linalg.norm(z, axis=-1, keepdims=True)
+    assert (norm > 0).all(), "eye and target must differ"
+    z = z / norm
     x = np.cross(z, up)  # x = right, y = down, so image up (-y) aligns with the world up axis
-    x = x / np.linalg.norm(x)
-    c2w = np.eye(4)
-    c2w[:3, :3] = np.column_stack([x, np.cross(z, x), z])
-    c2w[:3, 3] = eye
+    x = x / np.linalg.norm(x, axis=-1, keepdims=True)
+    c2w = np.zeros((*z.shape[:-1], 4, 4))
+    c2w[..., :3, :3] = np.stack([x, np.cross(z, x), z], axis=-1)
+    c2w[..., :3, 3] = eye
+    c2w[..., 3, 3] = 1.0
     return RigidTransform.from_matrix(c2w).inv().as_matrix().astype(np.float32)
 
 
-def nerf_camera(frame: dict) -> np.ndarray:
-    """Convert a NeRF blender camera pose to a world-to-camera view matrix."""
-    c2w = np.array(frame["transform_matrix"], np.float64) @ np.diag([1.0, -1.0, -1.0, 1.0])
+def nerf_camera(c2w: np.ndarray | list) -> np.ndarray:
+    """Convert NeRF blender camera-to-world matrices to world-to-camera view matrices.
+
+    Args:
+        c2w: (..., 4, 4) blender camera-to-world matrices, e.g. ``transform_matrix`` entries
+            of a NeRF transforms JSON.
+
+    Returns:
+        (..., 4, 4) float32 world-to-camera matrices in OpenCV convention, at most one batch
+        dimension.
+    """
+    c2w = np.asarray(c2w, np.float64) @ np.diag([1.0, -1.0, -1.0, 1.0])
     return RigidTransform.from_matrix(c2w).inv().as_matrix().astype(np.float32)

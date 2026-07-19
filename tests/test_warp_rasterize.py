@@ -385,7 +385,7 @@ def test_render_lego_vs_gsplat(gsplat_ref: ModuleType) -> None:
     H, W = gt.shape[:2]
     ff = 0.5 * W / np.tan(0.5 * meta["camera_angle_x"])
     kw: _RenderKW = {
-        "viewmat": jnp.asarray(splax.utils.nerf_camera(frame)),
+        "viewmat": jnp.asarray(splax.utils.nerf_camera(frame["transform_matrix"])),
         "background": jnp.ones(3),
         "img_shape": (H, W),
         "f": (float(ff), float(ff)),

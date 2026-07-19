@@ -40,7 +40,7 @@ def _lego_scene() -> tuple[tuple[jax.Array, ...], np.ndarray, float]:
     """Load the pretrained lego splat and the frame-0 test pose (viewmat, focal)."""
     meta = json.loads((LEGO / "transforms_test.json").read_text())
     gaussians = splax.io.load_ply(PLY)
-    viewmat = splax.utils.nerf_camera(meta["frames"][0])
+    viewmat = splax.utils.nerf_camera(meta["frames"][0]["transform_matrix"])
     focal = float(0.5 * WIDTH / np.tan(0.5 * meta["camera_angle_x"]))
     return gaussians, viewmat, focal
 

@@ -51,7 +51,7 @@ def test_lego_render_psnr_regression(frame_idx: int) -> None:
     H, W = gt.shape[:2]
     gt = gt.astype(np.float32) / 255.0
     gt = gt[..., :3] * gt[..., 3:] + (1.0 - gt[..., 3:])  # composite on white
-    viewmat = splax.utils.nerf_camera(frame)
+    viewmat = splax.utils.nerf_camera(frame["transform_matrix"])
 
     ff = 0.5 * W / np.tan(0.5 * meta["camera_angle_x"])
     img = splax.inference.render(

@@ -118,7 +118,7 @@ def test_parity_lego_slice() -> None:
     frame = meta["frames"][0]
     W = H = 800
     ff = 0.5 * W / np.tan(0.5 * meta["camera_angle_x"])
-    viewmat = jnp.asarray(splax.utils.nerf_camera(frame))
+    viewmat = jnp.asarray(splax.utils.nerf_camera(frame["transform_matrix"]))
     args: _ProjArgs = {
         **PROJ_ARGS,
         "img_shape": (H, W),

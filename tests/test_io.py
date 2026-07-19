@@ -36,12 +36,9 @@ if TYPE_CHECKING:
 
 def lookat_viewmats(center: np.ndarray, radius: float, num_views: int) -> jax.Array:
     """World-to-camera matrices orbiting ``center`` (OpenCV convention, +z forward)."""
-    mats = []
-    for i in range(num_views):
-        az = 2 * np.pi * i / num_views
-        eye = center + radius * np.array([np.sin(az), 0.3, np.cos(az)])
-        mats.append(splax.utils.look_at(eye, center))
-    return jnp.asarray(np.stack(mats), jnp.float32)
+    az = 2 * np.pi * np.arange(num_views)[:, None] / num_views
+    eyes = center + radius * np.concatenate([np.sin(az), np.full_like(az, 0.3), np.cos(az)], axis=1)
+    return jnp.asarray(splax.utils.look_at(eyes, center))
 
 
 LEGO_PLY = Path(__file__).resolve().parents[1] / "data/scenes/lego.ply"

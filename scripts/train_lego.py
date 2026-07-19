@@ -42,7 +42,7 @@ def load_view(frame: dict, res: int) -> tuple[jax.Array, jax.Array]:
     if height != res:
         factor = height // res
         img = img.reshape(res, factor, res, factor, 3).mean((1, 3))
-    return jnp.asarray(img), jnp.asarray(splax.utils.nerf_camera(frame))
+    return jnp.asarray(img), jnp.asarray(splax.utils.nerf_camera(frame["transform_matrix"]))
 
 
 def load_view_alpha(frame: dict, res: int) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -52,7 +52,7 @@ def load_view_alpha(frame: dict, res: int) -> tuple[jax.Array, jax.Array, jax.Ar
     if height != res:
         factor = height // res
         img = img.reshape(res, factor, res, factor, 4).mean((1, 3))
-    viewmat = jnp.asarray(splax.utils.nerf_camera(frame))
+    viewmat = jnp.asarray(splax.utils.nerf_camera(frame["transform_matrix"]))
     return jnp.asarray(img[..., :3]), jnp.asarray(img[..., 3:]), viewmat
 
 

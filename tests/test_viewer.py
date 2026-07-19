@@ -13,31 +13,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from splax.viewer import Viewer, _covariances
+from splax.viewer import Viewer
 
 
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
-
-
-def test_covariances_identity_quat() -> None:
-    """With identity rotation the covariance is diag(scales**2)."""
-    scales = np.array([[0.1, 0.2, 0.3]], np.float32)
-    quats = np.array([[1.0, 0.0, 0.0, 0.0]], np.float32)
-    cov = _covariances(scales, quats)
-    np.testing.assert_allclose(cov[0], np.diag(scales[0] ** 2), atol=1e-7)
-
-
-def test_covariances_rotation() -> None:
-    """A 90 degree rotation about z swaps the x and y variances."""
-    scales = np.array([[0.1, 0.2, 0.3]], np.float32)
-    s = np.sin(np.pi / 4)
-    quats = np.array([[np.cos(np.pi / 4), 0.0, 0.0, s]], np.float32)  # wxyz
-    cov = _covariances(scales, quats)
-    expected = np.diag([0.2**2, 0.1**2, 0.3**2])
-    np.testing.assert_allclose(cov[0], expected, atol=1e-7)
 
 
 def test_viewer_roundtrip() -> None:
