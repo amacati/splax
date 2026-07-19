@@ -177,6 +177,47 @@ def render(
     return img.detach().cpu().numpy()
 
 
+def viewmat_grad(
+    means: jax.Array | np.ndarray,
+    scales: jax.Array | np.ndarray,
+    quats: jax.Array | np.ndarray,
+    colors: jax.Array | np.ndarray,
+    opacities: jax.Array | np.ndarray,
+    *,
+    viewmat: jax.Array | np.ndarray,
+    target: np.ndarray,
+    background: jax.Array | np.ndarray,
+    img_shape: tuple[int, int],
+    f: tuple[float, float],
+    c: tuple[float, float],
+    glob_scale: float,
+    clip_thresh: float,
+) -> np.ndarray:
+    """Gsplat gradient of ``mean((render(viewmat) - target) ** 2)`` wrt the viewmat.
+
+    Returns the (4, 4) numpy gradient.
+    """
+    H, W = img_shape
+    viewmat_t = _ft(viewmat).requires_grad_(True)
+    out, alpha, _meta = gsplat.rasterization(
+        _ft(means),
+        _ft(quats),
+        _ft(scales) * float(glob_scale),
+        _ft(opacities).reshape(-1),
+        _ft(colors),
+        viewmat_t[None],
+        _ft(_K(f, c))[None],
+        W,
+        H,
+        near_plane=float(clip_thresh),
+        eps2d=0.3,
+        render_mode="RGB",
+    )
+    img = out[0] + (1.0 - alpha[0]) * _ft(background).reshape(3)
+    ((img - _ft(target)) ** 2).mean().backward()
+    return viewmat_t.grad.detach().cpu().numpy()
+
+
 def grad(
     means: jax.Array | np.ndarray,
     scales: jax.Array | np.ndarray,
