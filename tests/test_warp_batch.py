@@ -167,32 +167,7 @@ def test_render_nested_vmap_grid() -> None:
     np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
 
 
-def _render_inf(
-    m: jax.Array,
-    s: jax.Array,
-    q: jax.Array,
-    c: jax.Array,
-    o: jax.Array,
-    vm: jax.Array,
-    **extra: jax.Array | tuple[tuple[int, int], ...],
-) -> jax.Array:
-    return splax.inference.render(m, s, q, c, o, viewmat=vm, **KW, **extra)
-
-
-def test_inference_render_nested_vmap_grid() -> None:
-    """inference.render nested vmap over an A splats x B viewmats grid == the double loop."""
-    scenes = [_rand_scene(N, seed=s) for s in (3, 4, 5)]
-    mb, sb, qb, cb, ob = (jnp.stack([sc[i] for sc in scenes]) for i in range(5))
-    ref = jnp.stack(
-        [jnp.stack([_render_inf(*sc, VIEWS[b]) for b in range(VIEWS.shape[0])]) for sc in scenes]
-    )
-    inner = lambda m, s, q, c, o: jax.vmap(lambda vm: _render_inf(m, s, q, c, o, vm))(VIEWS)  # noqa: E731
-    out = jax.vmap(inner)(mb, sb, qb, cb, ob)
-    assert out.shape == ref.shape
-    np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
-
-
-def test_inference_render_nested_shared_splat_transforms() -> None:
+def test_render_nested_shared_splat_transforms() -> None:
     """Nested vmap, shared splat, viewmat on both axes, transforms on the outer axis only."""
     m, s, q, c, o = _rand_scene(N, seed=6)
     slices = ((0, N // 2), (N // 2, N))
@@ -208,7 +183,8 @@ def test_inference_render_nested_shared_splat_transforms() -> None:
     )
 
     def one(vm: jax.Array, tf: jax.Array) -> jax.Array:
-        return _render_inf(m, s, q, c, o, vm, gaussian_transforms=tf, gaussian_slices=slices)
+        tf_kw = {"gaussian_transforms": tf, "gaussian_slices": slices}
+        return splax.render(m, s, q, c, o, viewmat=vm, **KW, **tf_kw)[0]
 
     ref = jnp.stack(
         [jnp.stack([one(vms[w, cam], tfs[w]) for cam in range(n_cams)]) for w in range(n_worlds)]

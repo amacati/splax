@@ -178,7 +178,7 @@ def render_logo(p: dict[str, jax.Array], H: int, W: int, bg: np.ndarray) -> jax.
     """Render the current parameter state into an RGB image."""
     splats = (p["means"], p["log_scales"], p["quats"], p["colors_logit"], p["opac_logit"])
     camera: dict = {"viewmat": VIEWMAT, "background": jnp.asarray(bg), "img_shape": (H, W)}
-    return splax.training.render_log(*splats, f=(F, F), **camera)[0]
+    return splax.render_log(*splats, f=(F, F), **camera)[0]
 
 
 def frame(p: dict[str, jax.Array], H: int, W: int, bg: np.ndarray) -> np.ndarray:

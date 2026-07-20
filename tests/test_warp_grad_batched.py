@@ -100,7 +100,7 @@ def _render(
     H: int,
     W: int,
 ) -> jax.Array:
-    return splax.training.render(m, s, q, c, o, viewmat=v, background=bg, **_pk(H, W))[0]
+    return splax.render(m, s, q, c, o, viewmat=v, background=bg, **_pk(H, W))[0]
 
 
 def _rel(a: jax.Array | np.ndarray, b: jax.Array | np.ndarray) -> float:

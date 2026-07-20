@@ -232,9 +232,9 @@ def _render(
     H: int,
     W: int,
 ) -> jax.Array:
-    return splax.training.render(
-        means, scales, quats, colors, opac, viewmat=vm, background=bg, **_pk(H, W)
-    )[0]
+    return splax.render(means, scales, quats, colors, opac, viewmat=vm, background=bg, **_pk(H, W))[
+        0
+    ]
 
 
 def test_viewmat_finite_difference() -> None:

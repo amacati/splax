@@ -32,7 +32,7 @@ import jax.numpy as jnp
 import splax
 
 means, scales, quats, colors, opacities = splax.io.load_ply("scene.ply")
-img = splax.inference.render(
+img, _ = splax.render(
     means, scales, quats, colors, opacities, viewmat=viewmat,
     background=jnp.ones(3), img_shape=(H, W), f=(fx, fy),
 )  # (H, W, 3)
@@ -43,13 +43,13 @@ Batch over a stack of camera poses with `jax.vmap`. One batched kernel launch, n
 ```python
 import jax
 
-frames = jax.vmap(lambda vm: splax.inference.render(
+frames = jax.vmap(lambda vm: splax.render(
     means, scales, quats, colors, opacities,
     viewmat=vm, background=jnp.ones(3), img_shape=(H, W), f=(fx, fy),
-))(viewmats)  # (B, H, W, 3)
+)[0])(viewmats)  # (B, H, W, 3)
 ```
 
-Take gradients through the differentiable renderer with `jax.grad`. `splax.render` is `splax.training.render` and differentiates with respect to means, scales, quats, colors, opacities.
+Take gradients through the renderer with `jax.grad`. `splax.render` differentiates with respect to means, scales, quats, colors, opacities, the camera pose, and per-object rigid transforms.
 
 ```python
 import jax

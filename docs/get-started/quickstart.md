@@ -8,14 +8,15 @@ share the same five gaussian arrays: `means` `(N, 3)`, `scales` `(N, 3)`, `quats
 ## Render a scene
 
 `splax.io.load_ply` reads a 3DGS `.ply` into the five render-space arrays.
-`splax.inference.render` is the pure, grad-free forward path.
+`splax.render` returns an `(image, depths)` pair whose depth slot is `None`
+unless `render_depth=True`.
 
 ```python
 import jax.numpy as jnp
 import splax
 
 means, scales, quats, colors, opacities = splax.io.load_ply("scene.ply")
-img = splax.inference.render(
+img, _ = splax.render(
     means, scales, quats, colors, opacities,
     viewmat=viewmat, background=jnp.ones(3),
     img_shape=(H, W), f=(fx, fy),
@@ -34,18 +35,16 @@ Python loop.
 ```python
 import jax
 
-frames = jax.vmap(lambda vm: splax.inference.render(
+frames = jax.vmap(lambda vm: splax.render(
     means, scales, quats, colors, opacities,
     viewmat=vm, background=jnp.ones(3), img_shape=(H, W),
     f=(fx, fy),
-))(viewmats)  # (B, H, W, 3)
+)[0])(viewmats)  # (B, H, W, 3)
 ```
 
 ## Take a gradient
 
-`splax.render` is the differentiable `splax.training.render`. It differentiates
-with respect to means, scales, quats, colors, and opacities, and returns an
-`(image, depths)` pair whose depth slot is `None` unless `render_depth=True`.
+`splax.render` differentiates with respect to means, scales, quats, colors, and opacities.
 
 ```python
 import jax

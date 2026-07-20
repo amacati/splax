@@ -1,8 +1,9 @@
 """Warp projection kernels and their JAX FFI callables.
 
 This module holds the GPU side of the projection stage: the forward kernel that projects each
-gaussian to screen space and counts the tiles its opacity-aware tight ellipse touches, the three
-backward kernels (gaussians only, viewmat only, joint), and the shared ``wp.func`` vjp helpers. The
+gaussian to screen space and counts the tiles its opacity-aware tight ellipse touches, the four
+backward kernels (gaussians only, viewmat only, joint, transform-aware), and the shared ``wp.func``
+vjp helpers. The
 host-side ``_*_launch`` functions are wrapped into JAX FFI callables that the API layer in
 ``splax._project`` composes with ``jax.custom_vjp``.
 """
@@ -197,22 +198,7 @@ def _project_kernel(
         tf_id = transform_ids[gid]
         if tf_id >= 0:
             tf_idx = wp.where(sel_transforms, bid * num_transforms + tf_id, tf_id)
-            R_tf = wp.mat33(
-                gaussian_transforms[tf_idx, 0, 0],
-                gaussian_transforms[tf_idx, 0, 1],
-                gaussian_transforms[tf_idx, 0, 2],
-                gaussian_transforms[tf_idx, 1, 0],
-                gaussian_transforms[tf_idx, 1, 1],
-                gaussian_transforms[tf_idx, 1, 2],
-                gaussian_transforms[tf_idx, 2, 0],
-                gaussian_transforms[tf_idx, 2, 1],
-                gaussian_transforms[tf_idx, 2, 2],
-            )
-            t_tf = wp.vec3(
-                gaussian_transforms[tf_idx, 0, 3],
-                gaussian_transforms[tf_idx, 1, 3],
-                gaussian_transforms[tf_idx, 2, 3],
-            )
+            R_tf, t_tf = _load_transform(gaussian_transforms, tf_idx)
             mean = R_tf * mean + t_tf
             moved = wp.bool(True)
 
@@ -534,6 +520,69 @@ def _project_bwd_joint_launch(
     )
 
 
+def _project_bwd_transforms_launch(
+    means3d: wp.array[wp.vec3],
+    scales: wp.array[wp.vec3],
+    quats: wp.array[wp.vec4],
+    viewmat: wp.array2d[wp.float32],
+    radii: wp.array[wp.int32],
+    conics: wp.array[wp.vec3],
+    v_xy: wp.array[wp.vec2],
+    v_depth: wp.array[wp.float32],
+    v_conic: wp.array[wp.vec3],
+    gaussian_transforms: wp.array3d[wp.float32],
+    transform_ids: wp.array[wp.int32],
+    num_gaussians: int,
+    num_transforms: int,
+    fx: float,
+    fy: float,
+    glob_scale: float,
+    v_mean3d: wp.array[wp.vec3],
+    v_scale: wp.array[wp.vec3],
+    v_quat: wp.array[wp.vec4],
+    v_viewmat: wp.array2d[wp.float32],
+    v_transforms: wp.array3d[wp.float32],
+) -> None:
+    n = num_gaussians
+    B = v_mean3d.shape[0] // n
+    sels = _bwd_selectors(n, viewmat, means3d, scales, quats, radii, conics, v_xy, v_depth, v_conic)
+    sel_transforms = gaussian_transforms.shape[0] > num_transforms
+    v_mean3d.zero_()
+    v_scale.zero_()
+    v_quat.zero_()
+    v_viewmat.zero_()
+    v_transforms.zero_()
+    blocks_per_image = (n + _BWD_BLOCK - 1) // _BWD_BLOCK
+    wp.launch_tiled(
+        _project_bwd_transforms_kernel,
+        dim=[B * blocks_per_image],
+        inputs=[
+            means3d,
+            scales,
+            quats,
+            viewmat,
+            radii,
+            conics,
+            v_xy,
+            v_depth,
+            v_conic,
+            gaussian_transforms,
+            transform_ids,
+            n,
+            num_transforms,
+            blocks_per_image,
+            *sels,
+            sel_transforms,
+            fx,
+            fy,
+            glob_scale,
+        ],
+        outputs=[v_mean3d, v_scale, v_quat, v_viewmat, v_transforms],
+        block_dim=_BWD_BLOCK,
+        device=means3d.device,
+    )
+
+
 # Batch-native backward, exactly like the forward. Gaussian grads come out per
 # view and JAX reduces broadcast inputs over the batch axis. The viewmat grad is
 # a per-image accumulator.
@@ -566,6 +615,16 @@ _project_bwd_joint_ffi = nested_vmap(
     ),
     n_arrays=9,
     name="project_bwd_joint",
+)
+_project_bwd_transforms_ffi = nested_vmap(
+    jax_callable(
+        _project_bwd_transforms_launch,
+        num_outputs=5,
+        graph_mode=JaxCallableGraphMode.WARP,
+        vmap_method="expand_dims",
+    ),
+    n_arrays=11,
+    name="project_bwd_transforms",
 )
 
 
@@ -659,7 +718,7 @@ def _project_bwd_gaussians_kernel(
     vcov2d = _vcov2d_from_conic(conics[c_idx], v_conic_in[vc_idx])
     v_p, v_T, v_V = _proj_vjp(g, fx, fy, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d)
     v_mean3d[idx] = wp.transpose(g.W) * v_p
-    vs, vq = _scale_quat_vjp(g, quats[q_idx], v_V, glob_scale)
+    vs, vq = _scale_quat_vjp(g, quats[q_idx], _v_M_from_vV(v_V, g.M), glob_scale)
     v_scale[idx] = vs
     v_quat[idx] = vq
 
@@ -791,7 +850,7 @@ def _project_bwd_joint_kernel(
         vcov2d = _vcov2d_from_conic(conics[c_idx], v_conic_in[vc_idx])
         v_p, v_T, v_V = _proj_vjp(g, fx, fy, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d)
         v_mean3d[idx] = wp.transpose(g.W) * v_p
-        vs, vq = _scale_quat_vjp(g, quats[q_idx], v_V, glob_scale)
+        vs, vq = _scale_quat_vjp(g, quats[q_idx], _v_M_from_vV(v_V, g.M), glob_scale)
         v_scale[idx] = vs
         v_quat[idx] = vq
         v_R, v_t = _view_grad(g, mean, v_p, v_T)
@@ -804,6 +863,141 @@ def _project_bwd_joint_kernel(
         st = wp.tile_sum(wp.tile(v_t[i]))
         if tr == 0:
             wp.atomic_add(v_viewmat, ob + i, 3, wp.tile_extract(st, 0))
+
+
+# Transform-aware kernel, used whenever rigid transforms are active, no matter
+# which gradients were requested: the recompute must apply the same transforms
+# as the forward, or every gradient is taken at the wrong geometry. It computes
+# all gradient sets in one pass and the API layer discards the unperturbed ones.
+#
+# With mean' = R_tf mean + t_tf and M' = R_tf M the chain rules are
+#     v_mean = R_tf^T v_mean'          v_M = R_tf^T v_M'
+#     v_R_tf = outer(v_mean', mean) + v_M' M^T
+#     v_t_tf = v_mean'
+# where v_mean' = W^T v_p is the gradient at the transformed world mean and
+# v_M' = 2 sym(v_V) M' the one at the rotated covariance factor. Transform grads
+# reduce like the viewmat: slices are contiguous, so almost every block sees one
+# transform id and folds its 12 contributions with one tile_sum plus one atomic
+# per entry. Mixed blocks at slice boundaries and the final partial block fall
+# back to per-thread atomics. Plain per-thread atomics were measured to double
+# the backward at 50% coverage with a single transform (one contended
+# accumulator), the block reduction removes that.
+@wp.kernel
+def _project_bwd_transforms_kernel(
+    means3d: wp.array[wp.vec3],
+    scales: wp.array[wp.vec3],
+    quats: wp.array[wp.vec4],
+    viewmat: wp.array2d[wp.float32],
+    radii: wp.array[wp.int32],
+    conics: wp.array[wp.vec3],
+    v_xy_in: wp.array[wp.vec2],
+    v_depth_in: wp.array[wp.float32],
+    v_conic_in: wp.array[wp.vec3],
+    gaussian_transforms: wp.array3d[wp.float32],
+    transform_ids: wp.array[wp.int32],
+    num_gaussians: wp.int32,
+    num_transforms: wp.int32,
+    blocks_per_image: wp.int32,
+    sel_means: wp.bool,
+    sel_scales: wp.bool,
+    sel_quats: wp.bool,
+    sel_view: wp.bool,
+    sel_radii: wp.bool,
+    sel_conics: wp.bool,
+    sel_vxy: wp.bool,
+    sel_vdepth: wp.bool,
+    sel_vconic: wp.bool,
+    sel_transforms: wp.bool,
+    fx: wp.float32,
+    fy: wp.float32,
+    glob_scale: wp.float32,
+    v_mean3d: wp.array[wp.vec3],
+    v_scale: wp.array[wp.vec3],
+    v_quat: wp.array[wp.vec4],
+    v_viewmat: wp.array2d[wp.float32],
+    v_transforms: wp.array3d[wp.float32],
+):
+    blk, tr = wp.tid()
+    n = num_gaussians
+    image_id = blk // blocks_per_image
+    local_block = blk % blocks_per_image
+    gid = local_block * VIEW_BLOCK + tr
+    idx = image_id * n + gid
+    v_R = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    v_t = wp.vec3(0.0, 0.0, 0.0)
+    v_R_tf = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    v_t_tf = wp.vec3(0.0, 0.0, 0.0)
+    moved = wp.bool(False)
+    tf_id = wp.int32(-1)
+    if gid < n:
+        tf_id = transform_ids[gid]  # read even when culled, for the uniformity vote
+    r_idx = wp.where(sel_radii, idx, gid)
+    if gid < n and radii[r_idx] > 0:
+        m_idx = wp.where(sel_means, idx, gid)
+        s_idx = wp.where(sel_scales, idx, gid)
+        q_idx = wp.where(sel_quats, idx, gid)
+        c_idx = wp.where(sel_conics, idx, gid)
+        vx_idx = wp.where(sel_vxy, idx, gid)
+        vd_idx = wp.where(sel_vdepth, idx, gid)
+        vc_idx = wp.where(sel_vconic, idx, gid)
+        vb = wp.where(sel_view, image_id, 0) * 4
+        mean_local = means3d[m_idx]
+        mean = mean_local
+        R_tf = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+        if tf_id >= 0:
+            tf_idx = wp.where(sel_transforms, image_id * num_transforms + tf_id, tf_id)
+            R_tf, t_tf = _load_transform(gaussian_transforms, tf_idx)
+            mean = R_tf * mean + t_tf
+            moved = wp.bool(True)
+        W, trans = _load_W_trans(viewmat, vb)
+        g = _recompute_geom(mean, quats[q_idx], scales[s_idx], W, trans, glob_scale, fx, fy)
+        if moved:
+            g.M = R_tf * g.M
+            g.V = g.M * wp.transpose(g.M)
+        vcov2d = _vcov2d_from_conic(conics[c_idx], v_conic_in[vc_idx])
+        v_p, v_T, v_V = _proj_vjp(g, fx, fy, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d)
+        v_mean_world = wp.transpose(g.W) * v_p
+        v_M_world = _v_M_from_vV(v_V, g.M)
+        v_mean_out = v_mean_world
+        v_M = v_M_world
+        if moved:
+            v_mean_out = wp.transpose(R_tf) * v_mean_world
+            v_M = wp.transpose(R_tf) * v_M_world
+        v_mean3d[idx] = v_mean_out
+        vs, vq = _scale_quat_vjp(g, quats[q_idx], v_M, glob_scale)
+        v_scale[idx] = vs
+        v_quat[idx] = vq
+        v_R, v_t = _view_grad(g, mean, v_p, v_T)
+        if moved:
+            M_local = wp.transpose(R_tf) * g.M
+            v_R_tf = wp.outer(v_mean_world, mean_local) + v_M_world * wp.transpose(M_local)
+            v_t_tf = v_mean_world
+    ob = image_id * 4
+    tmin = wp.tile_extract(wp.tile_min(wp.tile(tf_id)), 0)
+    tmax = wp.tile_extract(wp.tile_max(wp.tile(tf_id)), 0)
+    uniform = tmin == tmax and tmin >= 0
+    mask = wp.where(uniform, 1.0, 0.0)  # masked so the tile ops run unconditionally
+    ob_tf = image_id * num_transforms + wp.max(tmin, 0)
+    for i in range(3):
+        for j in range(3):
+            s = wp.tile_sum(wp.tile(v_R[i, j]))
+            stf = wp.tile_sum(wp.tile(mask * v_R_tf[i, j]))
+            if tr == 0:
+                wp.atomic_add(v_viewmat, ob + i, j, wp.tile_extract(s, 0))
+                if uniform:
+                    wp.atomic_add(v_transforms, ob_tf, i, j, wp.tile_extract(stf, 0))
+        st = wp.tile_sum(wp.tile(v_t[i]))
+        sttf = wp.tile_sum(wp.tile(mask * v_t_tf[i]))
+        if tr == 0:
+            wp.atomic_add(v_viewmat, ob + i, 3, wp.tile_extract(st, 0))
+            if uniform:
+                wp.atomic_add(v_transforms, ob_tf, i, 3, wp.tile_extract(sttf, 0))
+    if moved and tmin != tmax:  # mixed block at a slice boundary, per-thread fallback
+        out_tf = image_id * num_transforms + tf_id
+        for i in range(3):
+            for j in range(3):
+                wp.atomic_add(v_transforms, out_tf, i, j, v_R_tf[i, j])
+            wp.atomic_add(v_transforms, out_tf, i, 3, v_t_tf[i])
 
 
 @wp.struct
@@ -936,10 +1130,8 @@ def _proj_vjp(
 
 
 @wp.func
-def _scale_quat_vjp(
-    g: _Geom, quat: wp.vec4, v_V: wp.mat33, glob_scale: wp.float32
-) -> tuple[wp.vec3, wp.vec4]:
-    # Returns (v_scale, v_quat)
+def _v_M_from_vV(v_V: wp.mat33, M: wp.mat33) -> wp.mat33:
+    # Symmetrized covariance cotangent, then v_M = 2 sym(v_V) M for V = M M^T
     vc0 = v_V[0, 0]
     vc1 = v_V[0, 1] + v_V[1, 0]
     vc2 = v_V[0, 2] + v_V[2, 0]
@@ -947,7 +1139,16 @@ def _scale_quat_vjp(
     vc4 = v_V[1, 2] + v_V[2, 1]
     vc5 = v_V[2, 2]
     v_Vc = wp.mat33(vc0, 0.5 * vc1, 0.5 * vc2, 0.5 * vc1, vc3, 0.5 * vc4, 0.5 * vc2, 0.5 * vc4, vc5)
-    v_M = (v_Vc * g.M) * 2.0
+    return (v_Vc * M) * 2.0
+
+
+@wp.func
+def _scale_quat_vjp(
+    g: _Geom, quat: wp.vec4, v_M: wp.mat33, glob_scale: wp.float32
+) -> tuple[wp.vec3, wp.vec4]:
+    # Returns (v_scale, v_quat). v_M is the cotangent of the local covariance
+    # factor M = R diag(glob_scale * scale), already rotated back into the local
+    # frame when a rigid transform moved the gaussian.
     R = g.R
     v_scale = wp.vec3(
         (R[0, 0] * v_M[0, 0] + R[1, 0] * v_M[1, 0] + R[2, 0] * v_M[2, 0]) * glob_scale,
@@ -991,6 +1192,25 @@ def _scale_quat_vjp(
         + w * (v_R[1, 0] - v_R[0, 1])
     )
     return v_scale, wp.vec4(vq_w, vq_x, vq_y, vq_z)
+
+
+@wp.func
+def _load_transform(transforms: wp.array3d[wp.float32], idx: wp.int32) -> tuple[wp.mat33, wp.vec3]:
+    # Rotation and translation of the (idx, 4, 4) rigid transform, shared by the
+    # forward and the transform-aware backward
+    R = wp.mat33(
+        transforms[idx, 0, 0],
+        transforms[idx, 0, 1],
+        transforms[idx, 0, 2],
+        transforms[idx, 1, 0],
+        transforms[idx, 1, 1],
+        transforms[idx, 1, 2],
+        transforms[idx, 2, 0],
+        transforms[idx, 2, 1],
+        transforms[idx, 2, 2],
+    )
+    t = wp.vec3(transforms[idx, 0, 3], transforms[idx, 1, 3], transforms[idx, 2, 3])
+    return R, t
 
 
 @wp.func

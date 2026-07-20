@@ -30,7 +30,7 @@ import numpy as np
 import optax
 from train_colmap import init_exposure, make_step
 
-from splax.training import render_log
+from splax import render_log
 
 if TYPE_CHECKING:
     from collections.abc import Hashable

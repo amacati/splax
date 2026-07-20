@@ -56,7 +56,7 @@ def make_splax_step(sc: Scene, batch: int) -> tuple[Callable[[], object], Callab
     camera = {"background": background, "img_shape": (sc.res, sc.res), "f": (sc.focal, sc.focal)}
 
     def loss_fn(params: list[jax.Array], viewmats: jax.Array) -> jax.Array:
-        imgs, _ = jax.vmap(partial(splax.training.render, *params, **camera))(viewmat=viewmats)
+        imgs, _ = jax.vmap(partial(splax.render, *params, **camera))(viewmat=viewmats)
         return jnp.mean((imgs - target) ** 2)
 
     step = jax.jit(jax.value_and_grad(loss_fn))

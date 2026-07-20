@@ -105,7 +105,7 @@ def _render(
     H: int,
     W: int,
 ) -> jax.Array:
-    return splax.training.render(m, s, q, c, o, viewmat=v, background=bg, **_pk(H, W))[0]
+    return splax.render(m, s, q, c, o, viewmat=v, background=bg, **_pk(H, W))[0]
 
 
 def test_viewmat_only_launches_view_kernel(record: set[str]) -> None:

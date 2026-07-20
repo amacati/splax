@@ -6,9 +6,7 @@ distillation module are not included.
 
 | Module | Description |
 |---|---|
-| `splax` | Package entry points and the low-level `project` / `rasterize` primitives |
-| `splax.inference` | Pure, grad-free renderer |
-| `splax.training` | Differentiable renderer (aliased as `splax.render`) |
+| `splax` | `render` / `render_log` and the low-level `project` / `rasterize` primitives |
 | `splax.mcmc` | Fixed-budget MCMC training utilities |
 | `splax.io` | 3DGS `.ply` load and write |
 

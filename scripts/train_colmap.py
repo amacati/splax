@@ -29,8 +29,8 @@ from scipy.spatial.transform import RigidTransform as TF
 from scipy.spatial.transform import Rotation as R
 
 import splax
+from splax import render_log
 from splax.colmap import init_from_points, read_cameras, read_images, read_points3D
-from splax.training import render_log
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable

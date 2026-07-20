@@ -1,9 +1,8 @@
-"""Differentiable rendering entry point.
+"""Rendering entry point.
 
-``splax.training.render`` composes the projection and rasterization primitives with their custom
-autodiff rules, so ``jax.grad`` flows through it with respect to the gaussian parameters and the
-camera pose. It shares every Warp kernel with the inference path and differs only in the forward
-rule keeping the blend residuals alive for the backward pass.
+``splax.render`` composes the projection and rasterization primitives with their custom autodiff
+rules, so ``jax.grad`` flows through it with respect to the gaussian parameters, the camera pose,
+and the per-object rigid transforms.
 
 Batched gradients are batch-native. ``jax.vmap(jax.grad(render))`` runs a single batched backward
 launch and matches per-sample sequential gradients. Inputs shared across the batch get their
@@ -11,18 +10,20 @@ gradients summed over the batch axis, while per-image inputs such as a batch of 
 per-image gradients.
 
 ``render_log`` renders from the unconstrained log/logit parameterization on top of it.
-
-Note:
-    For efficient inference without gradients, use ``splax.inference.render`` instead.
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import jax
 import jax.numpy as jnp
 
-from splax._project import opacity_compensation, project
+from splax._project import _transform_ids, opacity_compensation, project
 from splax._rasterize import rasterize, rasterize_depth
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def render(
@@ -41,13 +42,19 @@ def render(
     clip_thresh: float = 0.01,
     antialiased: bool = False,
     render_depth: bool = False,
+    gaussian_transforms: jax.Array | None = None,
+    gaussian_slices: Sequence[tuple[int, int]] | None = None,
 ) -> tuple[jax.Array, jax.Array | None]:
-    """Render a splat with autodiff support.
+    """Render a splat.
 
-    The image matches the forward result of ``splax.inference.render``, but is compatible with
-    ``jax.grad``. It is also aware of the arguments with respect to which gradients are requested,
-    and will only compute the necessary intermediate values. Depth rendering additionally returns
+    The render is differentiable and aware of the arguments with respect to which gradients are
+    requested, so only the necessary backward kernels launch. Depth rendering additionally returns
     the differentiable alpha-blended expected depth map for sparse-point depth regularization.
+
+    Slices of the gaussians can follow rigid transforms for composed dynamic scenes. The gaussians
+    in slice k move by ``gaussian_transforms[k]``, while all others stay static.  Transforms are
+    handled in the projection kernel without copying the splat. Gradients flow to the transforms as
+    well, so object poses can be optimized directly.
 
     Args:
         means3d: Gaussian centers, shape ``(N, 3)``.
@@ -64,15 +71,35 @@ def render(
         clip_thresh: Near-plane clipping threshold.
         antialiased: Enable the Mip-Splatting opacity compensation.
         render_depth: Additionally render the expected depth map.
+        gaussian_transforms: Rigid world-space transforms, shape ``(K, 4, 4)``.
+        gaussian_slices: K matching, non-overlapping ``(start, stop)`` gaussian index ranges.
 
     Returns:
         Tuple of the rendered image and the depth map, where the depth map is None unless
         ``render_depth`` is True.
     """
+    if (gaussian_transforms is None) != (gaussian_slices is None):
+        raise ValueError("gaussian_transforms and gaussian_slices must be passed together")
+    transform_ids = None
+    if gaussian_transforms is not None and gaussian_slices is not None:
+        if gaussian_transforms.shape[-3:] != (len(gaussian_slices), 4, 4):
+            raise ValueError(
+                f"gaussian_transforms shape {gaussian_transforms.shape} does not "
+                f"match {len(gaussian_slices)} slices, expected (K, 4, 4)"
+            )
+        transform_ids = _transform_ids(means3d.shape[0], gaussian_slices)
+
     camera: dict = {"img_shape": img_shape, "f": f, "c": c}
     camera |= {"glob_scale": glob_scale, "clip_thresh": clip_thresh}
     xys, depths, radii, conics, _, cum_tiles_hit = project(
-        means3d, scales, quats, viewmat, opacities=opacities, **camera
+        means3d,
+        scales,
+        quats,
+        viewmat,
+        opacities=opacities,
+        **camera,
+        gaussian_transforms=gaussian_transforms,
+        transform_ids=transform_ids,
     )
 
     blend_opacities = opacities

@@ -9,7 +9,7 @@ in Python and launches only the kernels the requested gradients need.
 from __future__ import annotations
 
 from functools import partial
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import jax
 import jax.core
@@ -18,11 +18,35 @@ import jax.numpy as jnp
 from splax._project._kernels import (
     _project_bwd_gaussians_ffi,
     _project_bwd_joint_ffi,
+    _project_bwd_transforms_ffi,
     _project_bwd_viewmat_ffi,
     _project_ffi,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 # region public API
+
+
+def _transform_ids(n: int, slices: Sequence[tuple[int, int]]) -> jax.Array:
+    """Map each gaussian to the transform it follows.
+
+    Slices must be non-overlapping and inside [0, n). Violations raise
+    immediately because a bad slice map silently corrupts the render. The checks
+    are pure Python on the static slice values, so they work under jit.
+    """
+    for k, (start, stop) in enumerate(slices):
+        if not (0 <= start < stop <= n):
+            raise ValueError(f"gaussian slice {k} = [{start}, {stop}) outside [0, {n})")
+    ordered = sorted(slices)
+    for (_, prev_stop), (start, _) in zip(ordered, ordered[1:]):
+        if start < prev_stop:
+            raise ValueError(f"gaussian slices overlap: {list(slices)}")
+    ids = jnp.full((n,), -1, jnp.int32)
+    for k, (start, stop) in enumerate(slices):
+        ids = ids.at[start:stop].set(k)
+    return ids
 
 
 def project(
@@ -37,6 +61,8 @@ def project(
     c: tuple[float, float] | None = None,
     glob_scale: float = 1.0,
     clip_thresh: float = 0.01,
+    gaussian_transforms: jax.Array | None = None,
+    transform_ids: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Project gaussians to screen space with the opacity-aware tile intersection.
 
@@ -46,6 +72,10 @@ def project(
     together run the joint kernel. Without gradients the primal runs exactly as the forward-only
     path. Opacities feed the integer tile counts and carry no gradient through projection, their
     gradient flows through rasterization instead.
+
+    With rigid transforms active the transform-aware backward runs instead, applying the same
+    transforms during the geometry recompute and additionally providing gradients with respect to
+    the transforms themselves.
 
     Args:
         mean3ds: Gaussian centers, shape ``(N, 3)``.
@@ -58,6 +88,9 @@ def project(
         c: Principal point ``(cx, cy)`` in pixels, defaulting to the image center.
         glob_scale: Global factor applied to all scales.
         clip_thresh: Near-plane clipping threshold.
+        gaussian_transforms: Rigid world-space transforms, shape ``(K, 4, 4)``.
+        transform_ids: Per-gaussian transform index from ``_transform_ids``, shape ``(N,)``. Passed
+            together with ``gaussian_transforms``.
 
     Returns:
         Tuple of the screen-space centers, depths, radii, conics, per-gaussian tile counts, and
@@ -66,18 +99,25 @@ def project(
     n = mean3ds.shape[0]
     if c is None:
         c = (img_shape[1] / 2, img_shape[0] / 2)
+    has_transforms = gaussian_transforms is not None
+    if not has_transforms:
+        gaussian_transforms = jnp.zeros((1, 4, 4), jnp.float32)
+        transform_ids = jnp.full((1,), -1, jnp.int32)
     return _project_differentiable(
         mean3ds,
         scales,
         quats,
         viewmat,
         opacities.reshape(n),
+        gaussian_transforms,
+        transform_ids,
         int(n),
         img_shape,
         f,
         c,
         float(glob_scale),
         float(clip_thresh),
+        has_transforms,
     )
 
 
@@ -116,22 +156,27 @@ def opacity_compensation(conics: jax.Array, radii: jax.Array, eps: float = 0.3) 
 # region custom vjp
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9, 10))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13))
 def _project_differentiable(
     mean3ds: jax.Array,
     scales: jax.Array,
     quats: jax.Array,
     viewmat: jax.Array,
     opac: jax.Array,
+    gaussian_transforms: jax.Array,
+    transform_ids: jax.Array,
     n: int,
     img_shape: tuple[int, int],
     f: tuple[float, float],
     c: tuple[float, float],
     glob_scale: float,
     clip_thresh: float,
+    has_transforms: bool,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    tf = gaussian_transforms if has_transforms else None
+    ids = transform_ids if has_transforms else None
     return _project_call(
-        mean3ds, scales, quats, viewmat, opac, n, img_shape, f, c, glob_scale, clip_thresh
+        mean3ds, scales, quats, viewmat, opac, n, img_shape, f, c, glob_scale, clip_thresh, tf, ids
     )
 
 
@@ -141,14 +186,17 @@ def _project_fwd_rule(
     quats: jax.custom_derivatives.CustomVJPPrimal,
     viewmat: jax.custom_derivatives.CustomVJPPrimal,
     opac: jax.custom_derivatives.CustomVJPPrimal,
+    gaussian_transforms: jax.custom_derivatives.CustomVJPPrimal,
+    transform_ids: jax.custom_derivatives.CustomVJPPrimal,
     n: int,
     img_shape: tuple[int, int],
     f: tuple[float, float],
     c: tuple[float, float],
     glob_scale: float,
     clip_thresh: float,
+    has_transforms: bool,
 ) -> tuple[tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array], tuple]:
-    # Under symbolic_zeros the five differentiable args arrive as CustomVJPPrimal
+    # Under symbolic_zeros the differentiable args arrive as CustomVJPPrimal
     # with a value and a static perturbed bit. The perturbation pattern is encoded
     # as () or None in the residuals. Both are pytree structure, not leaves, so
     # they stay concrete under jit and the backward rule branches in Python.
@@ -156,11 +204,18 @@ def _project_fwd_rule(
     # tile counts. The opacity gradient flows through rasterize.
     m, s, q = mean3ds.value, scales.value, quats.value
     vm, op = viewmat.value, opac.value
+    tf, ids = gaussian_transforms.value, transform_ids.value
     pert_gaussians = () if (mean3ds.perturbed or scales.perturbed or quats.perturbed) else None
     pert_viewmat = () if viewmat.perturbed else None
-    out = _project_call(m, s, q, vm, op, n, img_shape, f, c, glob_scale, clip_thresh)
+    pert_transforms = () if gaussian_transforms.perturbed else None
+    tf_arg = tf if has_transforms else None
+    ids_arg = ids if has_transforms else None
+    out = _project_call(
+        m, s, q, vm, op, n, img_shape, f, c, glob_scale, clip_thresh, tf_arg, ids_arg
+    )
     _xys, _depths, radii, conics, _nth, _cum = out
-    return out, (m, s, q, vm, radii, conics, pert_gaussians, pert_viewmat)
+    residuals = (m, s, q, vm, tf, ids, radii, conics)
+    return out, (*residuals, pert_gaussians, pert_viewmat, pert_transforms)
 
 
 def _materialize(ct: jax.Array | jax.custom_derivatives.SymbolicZero) -> jax.Array:
@@ -182,12 +237,17 @@ def _project_bwd_rule(
     c: tuple[float, float],
     glob_scale: float,
     clip_thresh: float,
+    has_transforms: bool,
     residuals: tuple,
     cotangents: tuple,
 ) -> tuple[jax.Array | None, ...]:
     # The perturbation pattern was recorded statically in the forward rule, so this
-    # branch is pure Python and only the needed backward kernels launch.
-    m, s, q, vm, radii, conics, pert_gaussians, pert_viewmat = residuals
+    # branch is pure Python and only the needed backward kernels launch. With
+    # transforms active the transform-aware kernel runs for every pattern, because
+    # the geometry recompute must apply the transforms regardless of which
+    # gradients were requested. It computes all gradient sets in one pass and the
+    # unperturbed ones are dropped here.
+    m, s, q, vm, tf, ids, radii, conics, pert_gaussians, pert_viewmat, pert_transforms = residuals
     v_xys, v_depths, _v_radii, v_conics, _v_nth, _v_cum = cotangents
     r = radii.reshape(n).astype(jnp.int32)
     vx = _materialize(v_xys)
@@ -197,8 +257,38 @@ def _project_bwd_rule(
     v_scale: jax.Array | None = None
     v_quat: jax.Array | None = None
     v_viewmat: jax.Array | None = None
+    v_transforms: jax.Array | None = None
     fx, fy = float(f[0]), float(f[1])
-    if pert_gaussians is not None and pert_viewmat is not None:
+    if has_transforms:
+        k = tf.shape[-3]
+        dims = {"v_mean3d": n, "v_scale": n, "v_quat": n, "v_viewmat": (4, 4)}
+        dims["v_transforms"] = (k, 4, 4)
+        vm3, vsc, vq, vvm, vtf = _project_bwd_transforms_ffi(
+            m,
+            s,
+            q,
+            vm,
+            r,
+            conics,
+            vx,
+            vd,
+            vc,
+            tf,
+            ids,
+            int(n),
+            int(k),
+            fx,
+            fy,
+            float(glob_scale),
+            output_dims=dims,
+        )
+        if pert_gaussians is not None:
+            v_mean, v_scale, v_quat = vm3, vsc, vq
+        if pert_viewmat is not None:
+            v_viewmat = vvm
+        if pert_transforms is not None:
+            v_transforms = vtf
+    elif pert_gaussians is not None and pert_viewmat is not None:
         v_mean, v_scale, v_quat, v_viewmat = _project_bwd_joint_ffi(
             m,
             s,
@@ -236,7 +326,7 @@ def _project_bwd_rule(
         v_mean, v_scale, v_quat = _project_bwd_gaussians_ffi(
             m, s, q, vm, r, conics, vx, vd, vc, int(n), fx, fy, float(glob_scale), output_dims=n
         )
-    return (v_mean, v_scale, v_quat, v_viewmat, None)
+    return (v_mean, v_scale, v_quat, v_viewmat, None, v_transforms, None)
 
 
 _project_differentiable.defvjp(_project_fwd_rule, _project_bwd_rule, symbolic_zeros=True)

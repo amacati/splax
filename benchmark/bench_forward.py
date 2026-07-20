@@ -141,7 +141,8 @@ def make_splax(sc: Scene, batch: int) -> tuple[Callable[[], object], Callable]:
     *params, background = sc.scene
     views = jnp.asarray(sc.viewmats[:batch])
     camera = {"background": background, "img_shape": (sc.res, sc.res), "f": (sc.focal, sc.focal)}
-    render = jax.jit(jax.vmap(partial(splax.inference.render, *params, **camera)))
+    render_view = partial(splax.render, *params, **camera)
+    render = jax.jit(jax.vmap(lambda viewmat: render_view(viewmat=viewmat)[0]))
     return lambda: jax.block_until_ready(render(viewmat=views)), render
 
 

@@ -1,12 +1,10 @@
 # Rendering
 
-`splax.inference.render` is the pure, grad-free forward path. It calls the
-projection and rasterization FFI primals directly, so there is no `jax.custom_vjp`
-interception and no residual saving. Calling `jax.grad` through it raises by
-design. For gradients use [`splax.training.render`](training.md).
+`splax.render` is the rendering entry point. The call returns an `(image, depths)` pair
+whose depth slot is `None` unless `render_depth=True`; gradients are covered under [Training](training.md).
 
 ```python
-img = splax.inference.render(
+img, _ = splax.render(
     means, scales, quats, colors, opacities,
     viewmat=viewmat, background=jnp.ones(3),
     img_shape=(H, W), f=(fx, fy),
@@ -63,7 +61,7 @@ The transform is applied on the fly inside the projection kernel, so the splat
 is never copied.
 
 ```python
-img = splax.inference.render(
+img, _ = splax.render(
     means, scales, quats, colors, opacities,
     viewmat=viewmat, background=jnp.ones(3),
     img_shape=(H, W), f=(fx, fy),
@@ -77,21 +75,23 @@ element renders the same shared splat with its objects at different poses, and
 one launch covers the whole batch.
 
 ```python
-render_at = lambda poses: splax.inference.render(
+render_at = lambda poses: splax.render(
     means, scales, quats, colors, opacities,
     viewmat=viewmat, background=jnp.ones(3),
     img_shape=(H, W), f=(fx, fy),
     gaussian_transforms=poses, gaussian_slices=slices,
-)
+)[0]
 imgs = jax.vmap(render_at)(pose_batch)  # (B, K, 4, 4) -> (B, H, W, 3)
 ```
 
 Omitting the arguments is the plain path with identical output and performance.
 The slices are static Python values, so changing them retraces a jitted render.
+The transforms are differentiable, see
+[object pose gradients](training.md#camera-pose-and-object-pose-gradients).
 
 ## Low-level primitives
 
-`splax.inference.render` composes two `jax.custom_vjp` primitives that are also
+`splax.render` composes two `jax.custom_vjp` primitives that are also
 public.
 
 - `splax.project` maps gaussians to screen-space `(xys, depths, radii, conics, num_tiles_hit, cum_tiles_hit)`.

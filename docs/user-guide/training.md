@@ -1,11 +1,10 @@
 # Training
 
-`splax.training.render`, aliased as `splax.render`, is the differentiable render
-path. It composes the `jax.custom_vjp` projection and rasterization primitives, so
-`jax.grad` and `jax.value_and_grad` flow through it with respect to means,
-scales, quats, colors, and opacities. The viewmat and background are constants by
-default. The call always returns an `(image, depths)` pair. The depth slot is
-`None` unless `render_depth=True`.
+`splax.render` composes the `jax.custom_vjp` projection and rasterization
+primitives, so `jax.grad` and `jax.value_and_grad` flow through it with respect
+to means, scales, quats, colors, and opacities. The viewmat, background, and
+rigid transforms are constants by default. The call always returns an
+`(image, depths)` pair. The depth slot is `None` unless `render_depth=True`.
 
 ```python
 def loss(means, scales, quats, colors, opacities):
@@ -19,11 +18,7 @@ def loss(means, scales, quats, colors, opacities):
 grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(means, scales, quats, colors, opacities)
 ```
 
-The rendered image and its forward computation are identical to
-`splax.inference.render` (which returns only the image). The only difference is
-that the differentiable path keeps the blend residuals alive for the backward.
-
-## Camera pose gradients
+## Camera pose and object pose gradients
 
 Gradient selection happens purely through `jax.grad` and its `argnums`. The
 projection backward is a single `jax.custom_vjp` with `symbolic_zeros=True`, so it
@@ -33,14 +28,15 @@ gradients need.
 - Differentiating with respect to means, scales, quats (and colors, opacities through the rasterizer) runs the gaussian-grad kernels. The viewmat is treated as a constant.
 - Differentiating with respect to the `viewmat` runs the camera-pose accumulator only. The gaussian projection chains and their atomics are skipped, so post-training pose optimization pays only for the camera gradient.
 - Differentiating with respect to both runs the joint kernel. The gaussian gradients are bit-identical to the gaussian-only path.
+- With [rigid transforms](rendering.md#dynamic-scene-composition) active, a transform-aware kernel runs instead for every gradient selection, applying the same transforms during the geometry recompute and additionally providing gradients with respect to the `(K, 4, 4)` transforms themselves, so object poses can be optimized directly.
 
 Because `viewmat` is a keyword argument of `render`, take its gradient by closing
 over it in the differentiated position, for example:
 
 ```python
 def loss(viewmat):
-    img, _ = splax.training.render(means, scales, quats, colors, opacities,
-                                   viewmat=viewmat, background=bg, **cam)
+    img, _ = splax.render(means, scales, quats, colors, opacities,
+                          viewmat=viewmat, background=bg, **cam)
     return photometric(img, target)
 
 pose_grad = jax.grad(loss)(viewmat)  # runs the camera-pose accumulator only

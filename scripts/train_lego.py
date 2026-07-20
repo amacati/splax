@@ -106,7 +106,7 @@ def _make_step(
         viewmat: jax.Array,
     ) -> tuple[jax.Array, jax.Array]:
         splats = tuple(params[k] for k in SPLAT_KEYS)
-        img, _ = splax.training.render_log(*splats, viewmat=viewmat, background=bg, **camera)
+        img, _ = splax.render_log(*splats, viewmat=viewmat, background=bg, **camera)
         gt = gt_alpha * gt_rgb + (1.0 - gt_alpha) * bg
         l1 = jnp.mean(jnp.abs(img - gt))
         dssim = 1.0 - dm_pix.ssim(img, gt)
@@ -193,7 +193,7 @@ def train(args: argparse.Namespace) -> dict:
 
     def eval_render(viewmat: jax.Array) -> jax.Array:
         splats = tuple(params[k] for k in SPLAT_KEYS)
-        return splax.training.render_log(*splats, viewmat=viewmat, **eval_camera)[0]
+        return splax.render_log(*splats, viewmat=viewmat, **eval_camera)[0]
 
     def eval_psnr() -> tuple[float, list[float]]:
         """Evaluate the current parameters on held out frames."""

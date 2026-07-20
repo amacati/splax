@@ -6,15 +6,15 @@ Python loop.
 
 ## Batched inference
 
-Wrap `splax.inference.render` in `jax.vmap` over any batched argument. Mapping
+Wrap `splax.render` in `jax.vmap` over any batched argument. Mapping
 over a stack of view matrices renders one image per camera.
 
 ```python
-frames = jax.vmap(lambda vm: splax.inference.render(
+frames = jax.vmap(lambda vm: splax.render(
     means, scales, quats, colors, opacities,
     viewmat=vm, background=jnp.ones(3), img_shape=(H, W),
     f=(fx, fy),
-))(viewmats)  # (B, H, W, 3)
+)[0])(viewmats)  # (B, H, W, 3)
 ```
 
 Both underlying FFIs carry `vmap_method="expand_dims"`, so the batch axis is
@@ -22,7 +22,7 @@ handled inside one launch.
 
 ## Batched gradients
 
-`jax.vmap(jax.grad(render))` over `splax.training.render` runs a single batched
+`jax.vmap(jax.grad(render))` over `splax.render` runs a single batched
 backward launch for every gradient selection, matching per-sample sequential
 gradients. The reduction depends on how an input is batched.
 

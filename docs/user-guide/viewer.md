@@ -10,7 +10,7 @@ The module is imported lazily (`splax.viewer` or `from splax import viewer`), so
 
 ## Rigid objects
 
-The viewer models a scene the same way `splax.inference.render` does with dynamic transforms. It takes a set of named rigid objects, each with its own gaussians
+The viewer models a scene the same way `splax.render` does with dynamic transforms. It takes a set of named rigid objects, each with its own gaussians
 and world pose. `add_splats` uploads an object's gaussians to the browser once, and `update_pose` moves it afterwards without re-uploading.
 
 ```python

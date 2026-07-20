@@ -15,18 +15,15 @@ import jax.numpy as jnp
 import splax
 
 means, scales, quats, colors, opacities = splax.io.load_ply("scene.ply")
-img = splax.inference.render(
+img, _ = splax.render(
     means, scales, quats, colors, opacities, viewmat=viewmat,
     background=jnp.ones(3), img_shape=(H, W), f=(fx, fy),
 )  # (H, W, 3)
 ```
 
-## Two render entry points
+## Render entry point
 
-splax exposes two renderers that share every Warp kernel and differ only in their JAX-level wrapping.
-
-- [`splax.inference.render`](user-guide/rendering.md) is the pure, grad-free forward path. Use it to serve a baked scene.
-- [`splax.training.render`](user-guide/training.md), aliased as `splax.render`, is the differentiable path. Use it with `jax.grad` to fit gaussians.
+[`splax.render`](user-guide/rendering.md) handles the rendering and is differentiable with respect to the gaussian parameters, the [camera pose, and per-object rigid transforms](user-guide/training.md).
 
 ## Where to go next
 

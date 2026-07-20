@@ -1,14 +1,11 @@
-"""PLY export round-trips, asset fetching, and the inference/training split parity.
+"""PLY export round-trips and asset fetching.
 
 ``splax.io.write_ply`` must be the exact inverse of ``splax.io.load_ply``.
 Two round-trips assert that:
 
 1. random render-space splats through write_ply then load_ply reproduce the inputs, and
 2. a real scene (lego.ply) written to a copy then reloaded renders to the same image
-   (fit-free, no training, just the load/write/load/render loop),
-
-plus that ``splax.inference.render`` and ``splax.training.render`` produce the
-identical forward image (the split is numerically zero-cost).
+   (fit-free, no training, just the load/write/load/render loop).
 
 ``splax.fetch`` is exercised against a local ``http.server`` on an ephemeral
 port: download, cache hit, force re-download, ETag-based invalidation, and the
@@ -20,7 +17,7 @@ from __future__ import annotations
 import http.server
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
@@ -44,15 +41,6 @@ def lookat_viewmats(center: np.ndarray, radius: float, num_views: int) -> jax.Ar
 LEGO_PLY = Path(__file__).resolve().parents[1] / "data/scenes/lego.ply"
 
 
-class _RenderKw(TypedDict):
-    background: jax.Array
-    glob_scale: float
-    clip_thresh: float
-
-
-RENDER_KW: _RenderKw = {"background": jnp.ones(3), "glob_scale": 1.0, "clip_thresh": 0.01}
-
-
 def _render(
     splats: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
     viewmat: jax.Array,
@@ -60,18 +48,18 @@ def _render(
     W: int,
 ) -> jax.Array:
     means, scales, quats, colors, opac = splats
-    return splax.inference.render(
+    return splax.render(
         means,
         scales,
         quats,
         colors,
         opac,
         viewmat=viewmat,
+        background=jnp.ones(3),
         img_shape=(H, W),
         f=(float(H), float(H)),
         c=(W // 2, H // 2),
-        **RENDER_KW,
-    )
+    )[0]
 
 
 def _random_splats(
@@ -122,42 +110,6 @@ def test_ply_render_roundtrip(tmp_path: Path) -> None:
     # essentially identical. Splatting's hard 1/255 cull can flip a handful of
     # pixels, so bound by max abs diff rather than requiring bit-exactness.
     assert np.max(np.abs(img1 - img2)) < 1e-3
-
-
-def test_inference_equals_training_forward() -> None:
-    """The split is numerically zero-cost: identical forward image."""
-    splats = load_ply(LEGO_PLY)
-    center = np.asarray(splats[0].mean(axis=0))
-    radius = float(np.percentile(np.linalg.norm(np.asarray(splats[0]) - center, axis=-1), 90))
-    viewmat = lookat_viewmats(center, radius, 1)[0]
-    means, scales, quats, colors, opac = splats
-
-    H = W = 200
-    inf_img = splax.inference.render(
-        means,
-        scales,
-        quats,
-        colors,
-        opac,
-        viewmat=viewmat,
-        img_shape=(H, W),
-        f=(float(H), float(H)),
-        c=(W // 2, H // 2),
-        **RENDER_KW,
-    )
-    train_img, _ = splax.training.render(
-        means,
-        scales,
-        quats,
-        colors,
-        opac,
-        viewmat=viewmat,
-        img_shape=(H, W),
-        f=(float(H), float(H)),
-        c=(W // 2, H // 2),
-        **RENDER_KW,
-    )
-    np.testing.assert_array_equal(np.asarray(inf_img), np.asarray(train_img))
 
 
 @pytest.fixture

@@ -98,19 +98,17 @@ def test_compensation_closed_form() -> None:
 
 
 def test_antialiased_off_matches_plain() -> None:
-    """Match plain inference when anti aliasing is off."""
+    """Match the plain render when anti aliasing is off."""
     n, H, W = 2500, 110, 110
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=2)
     pk = _pk(H, W)
 
-    off, _ = splax.training.render(
+    off, _ = splax.render(
         means, scales, quats, colors, opac, viewmat=vm, background=bg, antialiased=False, **pk
     )
-    inf = splax.inference.render(
-        means, scales, quats, colors, opac, viewmat=vm, background=bg, **pk
-    )
-    assert np.array_equal(np.asarray(off), np.asarray(inf)), (
-        "antialiased=False must be byte-identical to the plain inference forward"
+    plain, _ = splax.render(means, scales, quats, colors, opac, viewmat=vm, background=bg, **pk)
+    assert np.array_equal(np.asarray(off), np.asarray(plain)), (
+        "antialiased=False must be byte-identical to the plain forward"
     )
 
     # At the rasterize level, map_opacities=opac vs None gives byte-identical forward + grad.
