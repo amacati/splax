@@ -21,7 +21,8 @@ import pytest
 import warp as wp
 
 import splax
-import splax._intersect as _isect
+import splax._cache as _cache
+import splax._rasterize._sort._sort as _sort
 
 
 class _KW(TypedDict):
@@ -52,7 +53,7 @@ def _faithful_64bit_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     reference and matches only up to a perceptual bound (asserted in
     test_render_vmap_packed_matches_stack).
     """
-    monkeypatch.setattr(_isect, "_use_32bit_keys", lambda depth_bits: False)
+    monkeypatch.setattr(_sort, "_use_32bit_keys", lambda depth_bits: False)
 
 
 def _rand_scene(
@@ -245,7 +246,7 @@ def test_render_vmap_larger_batch_and_res() -> None:
 
 def test_render_vmap_packed_matches_stack(monkeypatch: pytest.MonkeyPatch) -> None:
     """Match packed batched render output against stacked unbatched output."""
-    monkeypatch.setattr(_isect, "_use_32bit_keys", lambda depth_bits: depth_bits >= 16)
+    monkeypatch.setattr(_sort, "_use_32bit_keys", lambda depth_bits: depth_bits >= 16)
     m, s, q, c, o = _rand_scene(12_000, seed=11)
     B, hh, ww = 8, 512, 512
     kw: _KW = {**KW, "img_shape": (hh, ww), "f": (float(hh), float(hh)), "c": (ww // 2, hh // 2)}
@@ -257,7 +258,7 @@ def test_render_vmap_packed_matches_stack(monkeypatch: pytest.MonkeyPatch) -> No
     out = np.asarray(
         jax.jit(jax.vmap(lambda vm: splax.render(m, s, q, c, o, viewmat=vm, **kw)[0]))(views)
     )  # B=8 render packs with depth_bits=18 (image 3 + tile 10)
-    assert _isect._scratch_cache[str(wp.get_device("cuda:0"))]["isect_dtype"] == wp.int32
+    assert _cache._scratch_cache[str(wp.get_device("cuda:0"))]["isect_dtype"] == wp.int32
     d = np.abs(out - np.asarray(ref))
     mse = float(np.mean((out - np.asarray(ref)) ** 2))
     psnr = 99.0 if mse == 0 else -10 * np.log10(mse)

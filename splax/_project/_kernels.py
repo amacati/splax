@@ -16,7 +16,7 @@ from splax._intersect import (
     ALPHA_THRESHOLD,
     BLOCK_WIDTH,
     GAUSSIAN_EXTEND_SQ,
-    ellipse_setup,
+    ellipse_init,
     ellipse_tile_count,
 )
 
@@ -237,7 +237,7 @@ def _project_kernel(
         or center_y - radius_y >= wp.float32(img_h)
     ):
         return  # Gaussian is fully offscreen, no tiles hit
-    setup = ellipse_setup(conic[0], conic[1], conic[2], t, center_x, center_y, tb_x, tb_y)
+    setup = ellipse_init(conic[0], conic[1], conic[2], t, center_x, center_y, tb_x, tb_y)
     count = ellipse_tile_count(setup)
     if count <= 0:
         return
@@ -301,7 +301,7 @@ def _project_bwd_warp(
     # Performance note: Every gaussian contributes to one shared v_viewmat per image. Each block
     # reduces its threads' contributions with wp.tile_sum and thread 0 issues one atomic per entry
     # per block. Projection has uniform per-gaussian work and no early termination, so the block
-    # barrier is amortised and the reduction beats plain per-thread atomics.
+    # barrier is faster than individual atomics.
     wp.launch_tiled(
         _project_bwd_kernel,
         dim=[B * blocks_per_image],
@@ -458,7 +458,7 @@ def _project_bwd_kernel(
         st = wp.tile_sum(wp.tile(v_t[i]))
         if tr == 0:
             wp.atomic_add(v_viewmat, ob + i, 3, wp.tile_extract(st, 0))
-    # Transform gradient. We distinguish three cases based:
+    # Transform gradient. We distinguish three cases:
     # 1. All TFs in the tile are uniformly static (all tf_id < 0), allowing us to skip all threads
     # 2. Uniformly moving, where all threads share one tf_id. This allows us to use tiled sums to
     # reduce the pressure on atomic accumulators.

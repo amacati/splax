@@ -1,11 +1,7 @@
 """Differentiable rasterization stage.
 
-``rasterize`` and ``rasterize_depth`` blend the projected gaussians into an image (and, for the
-depth variant, the alpha-blended expected depth map) by composing the Warp blend kernels from
-``splax._rasterize._kernels`` with a ``jax.custom_vjp``. The forward keeps the blend residuals
-final_Ts and final_idx alive so the backward can walk each tile back to front and reconstruct the
-transmittance. The sort and bin structures are not saved, the backward recomputes them
-deterministically from the saved cum_tiles_hit.
+``rasterize`` and ``rasterize_depth`` blend the projected gaussians into an image. The depth variant
+additionally renders an expected depth map.
 """
 
 from __future__ import annotations
@@ -40,14 +36,8 @@ def rasterize(
 ) -> jax.Array:
     """Blend projected gaussians into an (H, W, 3) image.
 
-    Differentiable with respect to colors, opacities, xys, and conics via jax.custom_vjp.
-    background, depths, radii, and cum_tiles_hit are non-diff. Without gradients the primal is
-    identical to the forward-only path, so pure inference does not regress.
-
-    The key emission walks the same opacity-aware ellipse as the projection that produced
-    cum_tiles_hit, so the inputs must come from splax.project. map_opacities is the raw opacity for
-    the key emission in antialiased mode, where opacities is the compensated blend opacity. It
-    defaults to opacities.
+    Differentiable with respect to colors, opacities, xys, and conics. background, depths, radii,
+    and cum_tiles_hit are non-differentiable.
     """
     n = colors.shape[0]
     H, W = img_shape
@@ -83,13 +73,10 @@ def rasterize_depth(
     img_shape: tuple[int, int],
     map_opacities: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    """Blend gaussians into (image, expected_depth).
+    """Blend gaussians into an image (H, W, 3) and expected depth map (H, W, 1).
 
     Identical to rasterize but additionally renders the alpha-blended expected depth map with the
-    same visibility weights as the color blend, used for sparse-point depth regularization. The
-    depths input carries a nonzero cotangent that flows through splax.project's backward to the
-    gaussian geometry and camera pose. This is a separate kernel, so the plain render never pays for
-    the extra channel.
+    same visibility weights as the color blend.
     """
     n = colors.shape[0]
     H, W = img_shape
@@ -133,7 +120,7 @@ def _rasterize(
     """Custom vjp for the blend, returning (out_img, final_Ts, final_idx).
 
     final_Ts and final_idx are the backward residuals, the per-pixel final transmittance and last
-    contributing gaussian. The public rasterize discards them; the fwd rule keeps them. JAX requires
+    contributing gaussian. The public rasterize discards them, the fwd rule keeps them. JAX requires
     a rigid array signature for custom_vjps, so the None default of map_opacities is resolved in the
     public rasterize before this is called.
     """
@@ -366,8 +353,7 @@ def _rasterize_depth_bwd(
     )
     v_opacity = v_opacity.reshape(opacities.shape)
     v_depths = v_depths.reshape(depths.shape)
-    # Unlike the plain rasterize, depths carries a nonzero cotangent that flows through project's
-    # backward to the geometry and camera pose.
+    # Unlike the plain rasterize, depths carries a nonzero cotangent
     return v_colors, v_opacity, None, None, v_xy, v_depths, None, v_conic, None
 
 

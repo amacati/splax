@@ -31,8 +31,9 @@ import pytest
 import warp as wp
 
 import splax
-import splax._intersect as _isect
-from splax._intersect import _map_intersects_64bit
+import splax._cache as _cache
+import splax._rasterize._sort._sort as _sort
+from splax._rasterize._sort._kernels import _map_intersects_64bit
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -251,16 +252,16 @@ def _rasterize_both_keymodes(
     args: tuple[jax.Array, ...], kw: _RastKW
 ) -> tuple[np.ndarray, np.ndarray]:
     """Rasterize the same inputs with the packed 32-bit key and the 64-bit key."""
-    orig = _isect._use_32bit_keys
+    orig = _sort._use_32bit_keys
     try:
         splax.clear_scratch()
-        _isect._use_32bit_keys = lambda depth_bits: depth_bits >= 16  # ty: ignore[invalid-assignment]
+        _sort._use_32bit_keys = lambda depth_bits: depth_bits >= 16  # ty: ignore[invalid-assignment]
         packed = np.asarray(splax.rasterize(*args, **kw))
         splax.clear_scratch()
-        _isect._use_32bit_keys = lambda depth_bits: False  # ty: ignore[invalid-assignment]
+        _sort._use_32bit_keys = lambda depth_bits: False  # ty: ignore[invalid-assignment]
         wide = np.asarray(splax.rasterize(*args, **kw))
     finally:
-        _isect._use_32bit_keys = orig
+        _sort._use_32bit_keys = orig
         splax.clear_scratch()
     return packed, wide
 
@@ -351,7 +352,7 @@ def test_packed_fallback_triggers_when_bits_dont_fit() -> None:
     splax.clear_scratch()
     img, _ = splax.render(m, s, q, c, o, viewmat=_id_viewmat(), **kw)
     img.block_until_ready()
-    assert _isect._scratch_cache[dev]["isect_dtype"] == wp.int32
+    assert _cache._scratch_cache[dev]["isect_dtype"] == wp.int32
 
     # B=8: image(3)+tile(13)=16 > 15, falls back to int64 scratch
     splax.clear_scratch()
@@ -359,7 +360,7 @@ def test_packed_fallback_triggers_when_bits_dont_fit() -> None:
     jax.jit(jax.vmap(lambda vm: splax.render(m, s, q, c, o, viewmat=vm, **kw)[0]))(
         views
     ).block_until_ready()
-    assert _isect._scratch_cache[dev]["isect_dtype"] == wp.int64
+    assert _cache._scratch_cache[dev]["isect_dtype"] == wp.int64
     splax.clear_scratch()
 
 
