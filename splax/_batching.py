@@ -1,11 +1,14 @@
 """Nested jax.vmap for the Warp FFI callables.
 
-Warp's jax_callable batches a single leading axis (vmap_method="expand_dims"). Under nested vmap an
-operand mapped over one axis but broadcast over another collapses to a partial batch, so the kernel
-launches A*B images and reads it out of bounds. nested_vmap wraps a callable in a primitive whose
-batching rule folds every vmap axis into one flat batch (operands mapped over no axis stay shared),
-then lowers to a single vmap. Wrapping every projection and rasterization FFI gives project,
-rasterize, render, and their gradients nested vmap from one place.
+Our Warp kernels only operate on one batch dimension. We therefore have to flatten nested vmap axes
+into one flat batch. Furthermore, nested vmapping of an operand mapped over one axis but broadcast
+over another collapses to a partial batch, which our kernels cannot handle. We therefore have to
+tile the broadcasted operand to match the batch size.
+
+Note that this is not equivalent to vmap_method="broadcast_all" for two reasons. First, we flatten
+vmaps to make them compatible with our kernels. Second, and more importantly, we only tile arguments
+that are at least vmapped over once. Unbatched arguments, i.e. the splat parameters, remain shared
+across the batch, avoiding excessive memory allocation.
 """
 
 from __future__ import annotations
@@ -26,11 +29,6 @@ if TYPE_CHECKING:
     FrozenDims = int | tuple[int, ...] | frozenset[tuple[str, int | tuple[int, int]]]
 
 
-def _tile(x: jax.Array, sz: int, cur: int) -> jax.Array:
-    base = x.shape[2:]
-    return jnp.broadcast_to(x, (sz, cur, *base)).reshape(sz * cur, *base)
-
-
 def nested_vmap(ffi: Callable, n_arrays: int, name: str) -> Callable:
     """Wrap a Warp jax_callable so nested jax.vmap flattens to its single-axis batch.
 
@@ -43,7 +41,7 @@ def nested_vmap(ffi: Callable, n_arrays: int, name: str) -> Callable:
     prim.multiple_results = True
 
     def call(statics: tuple[Static, ...], out_dims: FrozenDims) -> Callable:
-        # dict output_dims -> frozenset for a hashable param. Warp reads by name so order is moot
+        # dict output_dims -> frozenset for hashability. Warp reads by name so order doesn't matter.
         dims = dict(out_dims) if isinstance(out_dims, frozenset) else out_dims
         return lambda *arrays: tuple(ffi(*arrays, *statics, output_dims=dims))
 
@@ -86,19 +84,19 @@ def nested_vmap(ffi: Callable, n_arrays: int, name: str) -> Callable:
         sz = next(m.shape[0] for m, d in zip(moved, dims) if d is not None)
         prior = any(mask)
         cur = 1
-        if prior:
+        if prior:  # We are inside a nested vmap, so we have to fold with the last batch size
             i = next(k for k, mk in enumerate(mask) if mk)
             cur = moved[i].shape[1] if dims[i] is not None else moved[i].shape[0]
         new_mask = tuple(bool(mk) or d is not None for mk, d in zip(mask, dims))
         flat = []
         for m, mk, d in zip(moved, mask, dims):
-            if mk and d is not None:
+            if mk and d is not None:  # Has been folded before AND has a new batch dimension
                 flat.append(m.reshape(sz * cur, *m.shape[2:]))
-            elif mk:
-                flat.append(_tile(m[None], sz, cur))
-            elif d is not None:
-                flat.append(_tile(m[:, None], sz, cur))
-            else:
+            elif mk:  # Has been folded before but has no new batch dimension, so we need to extend
+                flat.append(jnp.tile(m, (sz, *(1,) * (m.ndim - 1))))
+            elif d is not None:   # Not folded before, but has a new batch dimension.
+                flat.append(jnp.repeat(m, cur, axis=0))  # Retroactively repeat across prior batches
+            else:  # Not folded and no batch dimension, continue to share across the batch
                 flat.append(m)
         outs = prim.bind(*flat, mask=new_mask, statics=statics, out_dims=out_dims)
         split = lambda o: o.reshape(sz, cur, *o.shape[1:]) if prior else o.reshape(sz, *o.shape[1:])  # noqa: E731

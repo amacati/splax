@@ -194,11 +194,6 @@ def ellipse_tile_count(s: _Ellipse) -> wp.int32:
     return count
 
 
-def _bits_for_count(count: int) -> int:
-    """Return the number of bits needed to index ``[0, count)``."""
-    return 0 if count <= 1 else (count - 1).bit_length()
-
-
 # Persistent grow-only scratch cache. The pipeline needs three buffers whose sizes depend on the
 # data-dependent intersection count:
 #   isect_ids / gaussian_ids  radix sort key and value ping-pong buffers. Warp's radix_sort_pairs
@@ -624,8 +619,9 @@ def _sort_and_bin(
     the full scratch buffer whose valid prefix is [0, num_intersects).
     """
     num_tiles = tile_bounds_x * tile_bounds_y
-    tile_n_bits = _bits_for_count(num_tiles)
-    image_n_bits = _bits_for_count(B)
+    # bits to index [0, num_tiles) and [0, B), the tile and image id fields of the sort key
+    tile_n_bits = (num_tiles - 1).bit_length()
+    image_n_bits = (B - 1).bit_length()
     upper_bits = image_n_bits + tile_n_bits
     depth_bits = 31 - upper_bits
     packed = _use_32bit_keys(depth_bits)

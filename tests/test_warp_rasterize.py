@@ -32,7 +32,7 @@ import warp as wp
 
 import splax
 import splax._intersect as _isect
-from splax._intersect import _bits_for_count, _map_intersects_64bit
+from splax._intersect import _map_intersects_64bit
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -455,7 +455,7 @@ def test_snugbox_emit_matches_count(n: int, H: int, W: int) -> None:
     tbx = (W + bw - 1) // bw
     tby = (H + bw - 1) // bw
     num_tiles = tbx * tby
-    tile_n_bits = _bits_for_count(num_tiles)
+    tile_n_bits = (num_tiles - 1).bit_length()  # bits to index [0, num_tiles), see _sort_and_bin
 
     dev = "cuda:0"
     xys_w = wp.array(np.asarray(xys), dtype=wp.vec2, device=dev)
