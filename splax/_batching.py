@@ -94,7 +94,7 @@ def nested_vmap(ffi: Callable, n_arrays: int, name: str) -> Callable:
                 flat.append(m.reshape(sz * cur, *m.shape[2:]))
             elif mk:  # Has been folded before but has no new batch dimension, so we need to extend
                 flat.append(jnp.tile(m, (sz, *(1,) * (m.ndim - 1))))
-            elif d is not None:   # Not folded before, but has a new batch dimension.
+            elif d is not None:  # Not folded before, but has a new batch dimension.
                 flat.append(jnp.repeat(m, cur, axis=0))  # Retroactively repeat across prior batches
             else:  # Not folded and no batch dimension, continue to share across the batch
                 flat.append(m)
