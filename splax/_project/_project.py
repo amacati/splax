@@ -71,6 +71,9 @@ def project(
     if not has_transforms:
         gaussian_transforms = jnp.zeros((1, 4, 4), jnp.float32)
         transform_ids = jnp.full((1,), -1, jnp.int32)
+    # Warp works scalar-last (xyzw). Roll the wxyz inputs once here under JIT. jax.grad rolls the
+    # returned quat gradient back to wxyz through this op, so the kernels stay purely xyzw.
+    quats = jnp.roll(quats, -1, axis=-1)
     return _project(
         mean3ds,
         scales,

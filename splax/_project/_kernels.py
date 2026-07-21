@@ -33,7 +33,7 @@ VIEW_BLOCK = wp.constant(256)  # threads per block for the tile_sum viewmat redu
 def _project_warp(
     means3d: wp.array[wp.vec3],
     scales: wp.array[wp.vec3],
-    quats: wp.array[wp.vec4],
+    quats: wp.array[wp.quat],
     viewmat: wp.array2d[wp.float32],
     opacities: wp.array[wp.float32],
     gaussian_transforms: wp.array3d[wp.float32],
@@ -58,7 +58,7 @@ def _project_warp(
     cum_tiles_hit: wp.array[wp.int32],
 ) -> None:
     """Launch the kernel behind the ffi, deriving the batch selectors from runtime shapes.
-    
+
     Native batch handling in jax requires jax.vmap with vmap_method="expand_dims". Warp's FFI
     callback, however, collapses batches into the leading array dimension. We detect this and
     configure the kernel to account for it, enabling one single kernel launch over all batches.
@@ -125,7 +125,7 @@ _project_ffi = nested_vmap(
 def _project_kernel(
     means3d: wp.array[wp.vec3],
     scales: wp.array[wp.vec3],
-    quats: wp.array[wp.vec4],
+    quats: wp.array[wp.quat],
     viewmat: wp.array2d[wp.float32],
     opacities: wp.array[wp.float32],
     gaussian_transforms: wp.array3d[wp.float32],
@@ -154,113 +154,57 @@ def _project_kernel(
     conics: wp.array[wp.vec3],
     num_tiles_hit: wp.array[wp.int32],
 ):
-    # Launched over B*N flat threads, no host loop. bid is the batch element, gid
-    # the gaussian within the shared scene. Each input array is either batched
-    # (leading dim B*N or 4B, selector 1, indexed at the flat idx) or broadcast
-    # (leading dim N or 4, selector 0, indexed at gid or row 0). Outputs are always
-    # full batch. For B=1 this is exactly the unbatched path.
     idx = wp.tid()
     n = num_gaussians
-    bid = idx // n
-    gid = idx % n
+    bid = idx // n  # batch id used to select the viewmat and transform slice
+    gid = idx % n  # gaussian id. Used as index when the input is broadcast
     m_idx = wp.where(sel_means, idx, gid)
     s_idx = wp.where(sel_scales, idx, gid)
     q_idx = wp.where(sel_quats, idx, gid)
     o_idx = wp.where(sel_opac, idx, gid)
     vb = wp.where(sel_view, bid, 0) * 4  # row offset into (4B, 4) viewmat
 
-    radii[idx] = 0
-    num_tiles_hit[idx] = 0
     xys[idx] = wp.vec2(0.0, 0.0)
     depths[idx] = 0.0
+    radii[idx] = 0
     conics[idx] = wp.vec3(0.0, 0.0, 0.0)
+    num_tiles_hit[idx] = 0
 
     mean = means3d[m_idx]
 
-    # Optional rigid transforms tied to gaussians. transform_ids maps each
-    # gaussian to the transform it follows, -1 leaves it static. The transform
-    # stack is either broadcast (K, 4, 4) or batched (B*K, 4, 4), selected like
-    # the viewmat, so a batched render moves the same gaussians differently in
-    # every batch element. The mean moves in world space here, the covariance
-    # follows via M below. With has_transforms == 0 nothing in this block
-    # executes and the kernel matches the plain path exactly.
+    # Optional rigid transforms for the splats that moves them in world space
     R_tf = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
     moved = wp.bool(False)
-    if has_transforms:
+    if has_transforms:  # Transforms are optional, skip if not present
         tf_id = transform_ids[gid]
-        if tf_id >= 0:
+        if tf_id >= 0:  # -1 means skipping the transform for this particular gaussian
+            # Transforms are either broadcast (K, 4, 4) or batched (B*K, 4, 4). If batched, we need
+            # to load the transform for the correct gaussian and batch element
             tf_idx = wp.where(sel_transforms, bid * num_transforms + tf_id, tf_id)
             R_tf, t_tf = _load_transform(gaussian_transforms, tf_idx)
             mean = R_tf * mean + t_tf
             moved = wp.bool(True)
 
-    mx = mean[0]
-    my = mean[1]
-    mz = mean[2]
-
-    # near-plane clip on p_view = viewmat @ mean (row-major 4x3)
-    pvx = (
-        viewmat[vb + 0, 0] * mx
-        + viewmat[vb + 0, 1] * my
-        + viewmat[vb + 0, 2] * mz
-        + viewmat[vb + 0, 3]
-    )
-    pvy = (
-        viewmat[vb + 1, 0] * mx
-        + viewmat[vb + 1, 1] * my
-        + viewmat[vb + 1, 2] * mz
-        + viewmat[vb + 1, 3]
-    )
-    pvz = (
-        viewmat[vb + 2, 0] * mx
-        + viewmat[vb + 2, 1] * my
-        + viewmat[vb + 2, 2] * mz
-        + viewmat[vb + 2, 3]
-    )
-    if pvz <= clip_thresh:
+    # camera-space position p_view = viewmat @ mean (upper 3x4 block), then near-plane clip
+    W, trans = _load_W_trans(viewmat, vb)
+    p_view = W * mean + trans
+    if p_view[2] <= clip_thresh:
         return
 
     # world covariance V3 = M M^T with M = R diag(glob_scale * scale)
-    R = _quat_to_rotmat(quats[q_idx])
-    s = scales[s_idx]
-    sx = glob_scale * s[0]
-    sy = glob_scale * s[1]
-    sz = glob_scale * s[2]
-    M = wp.mat33(
-        R[0, 0] * sx,
-        R[0, 1] * sy,
-        R[0, 2] * sz,
-        R[1, 0] * sx,
-        R[1, 1] * sy,
-        R[1, 2] * sz,
-        R[2, 0] * sx,
-        R[2, 1] * sy,
-        R[2, 2] * sz,
-    )
-    if moved:
-        # rotate the covariance factor, V3 becomes R_tf V3 R_tf^T
+    M = wp.quat_to_matrix(quats[q_idx]) * wp.diag(glob_scale * scales[s_idx])
+    if moved:  # If an external transform was applied, account for the additional rotation
         M = R_tf * M
     V3 = M * wp.transpose(M)
 
     # EWA projection of the covariance
-    W = wp.mat33(
-        viewmat[vb + 0, 0],
-        viewmat[vb + 0, 1],
-        viewmat[vb + 0, 2],
-        viewmat[vb + 1, 0],
-        viewmat[vb + 1, 1],
-        viewmat[vb + 1, 2],
-        viewmat[vb + 2, 0],
-        viewmat[vb + 2, 1],
-        viewmat[vb + 2, 2],
-    )
     tan_fovx = 0.5 * wp.float32(img_w) / fx
     tan_fovy = 0.5 * wp.float32(img_h) / fy
     lim_x = 1.3 * tan_fovx
     lim_y = 1.3 * tan_fovy
-    tx = pvx
-    ty = pvy
-    tz = pvz
+    tx = p_view[0]
+    ty = p_view[1]
+    tz = p_view[2]
     tx = tz * wp.min(lim_x, wp.max(-lim_x, tx / tz))
     ty = tz * wp.min(lim_y, wp.max(-lim_y, ty / tz))
     rz = 1.0 / tz
@@ -280,16 +224,15 @@ def _project_kernel(
     conic = wp.vec3(cyy * inv_det, -cxy * inv_det, cxx * inv_det)
 
     # pixel center from the unclamped p_view
-    rw = 1.0 / (pvz + 1e-6)
-    center_x = (pvx * rw) * fx + cx
-    center_y = (pvy * rw) * fy + cy
+    rw = 1.0 / (p_view[2] + 1e-6)
+    center_x = (p_view[0] * rw) * fx + cx
+    center_y = (p_view[1] * rw) * fy + cy
 
     tb_x = (img_w + BLOCK_WIDTH - 1) / BLOCK_WIDTH
     tb_y = (img_h + BLOCK_WIDTH - 1) / BLOCK_WIDTH
 
-    # Opacity-aware tight tile intersection. The rasterize key emission
-    # walks the identical ellipse via the shared _intersect helpers, so the counted
-    # and emitted tile totals match exactly.
+    # Opacity-aware tight tile intersection. Uses the _intersect helpers shared with the rasterizer,
+    # so the counted and emitted tile totals match exactly.
     opac = opacities[o_idx]
     if opac < ALPHA_THRESHOLD:
         return  # alpha < 1/255 everywhere, contributes nothing
@@ -298,43 +241,23 @@ def _project_kernel(
     radius_x = wp.ceil(ext * wp.sqrt(cxx))
     radius_y = wp.ceil(ext * wp.sqrt(cyy))
     if radius_x <= 0.0 and radius_y <= 0.0:
-        return
+        return  # Extend is less than one pixel in both axes
     if (
         center_x + radius_x <= 0.0
         or center_x - radius_x >= wp.float32(img_w)
         or center_y + radius_y <= 0.0
         or center_y - radius_y >= wp.float32(img_h)
     ):
-        return
+        return  # Gaussian is fully offscreen, no tiles hit
     setup = ellipse_setup(conic[0], conic[1], conic[2], t, center_x, center_y, tb_x, tb_y)
     count = ellipse_tile_count(setup)
     if count <= 0:
         return
     num_tiles_hit[idx] = count
-    depths[idx] = pvz
+    depths[idx] = p_view[2]
     radii[idx] = wp.int32(wp.max(radius_x, radius_y))
     xys[idx] = wp.vec2(center_x, center_y)
     conics[idx] = conic
-
-
-@wp.func
-def _quat_to_rotmat(q: wp.vec4) -> wp.mat33:
-    # quats are stored scalar-first (w, x, y, z)
-    w = q[0]
-    x = q[1]
-    y = q[2]
-    z = q[3]
-    return wp.mat33(
-        1.0 - 2.0 * (y * y + z * z),
-        2.0 * (x * y - w * z),
-        2.0 * (x * z + w * y),
-        2.0 * (x * y + w * z),
-        1.0 - 2.0 * (x * x + z * z),
-        2.0 * (y * z - w * x),
-        2.0 * (x * z - w * y),
-        2.0 * (y * z + w * x),
-        1.0 - 2.0 * (x * x + y * y),
-    )
 
 
 # region backward kernels
@@ -367,7 +290,7 @@ def _quat_to_rotmat(q: wp.vec4) -> wp.mat33:
 def _project_bwd_warp(
     means3d: wp.array[wp.vec3],
     scales: wp.array[wp.vec3],
-    quats: wp.array[wp.vec4],
+    quats: wp.array[wp.quat],
     viewmat: wp.array2d[wp.float32],
     radii: wp.array[wp.int32],
     conics: wp.array[wp.vec3],
@@ -501,7 +424,7 @@ def _bwd_selectors(
 def _project_bwd_kernel(
     means3d: wp.array[wp.vec3],
     scales: wp.array[wp.vec3],
-    quats: wp.array[wp.vec4],
+    quats: wp.array[wp.quat],
     viewmat: wp.array2d[wp.float32],
     radii: wp.array[wp.int32],
     conics: wp.array[wp.vec3],
@@ -566,26 +489,37 @@ def _project_bwd_kernel(
             mean = R_tf * mean + t_tf
             moved = wp.bool(True)
         W, trans = _load_W_trans(viewmat, vb)
-        g = _recompute_geom(mean, quats[q_idx], scales[s_idx], W, trans, glob_scale, fx, fy)
+        # Recomputed geometry, deterministic and bit-identical to the forward. p is the unclamped
+        # camera-space position, s the glob_scale-applied scale, M = R diag(s) the covariance factor
+        # (rotated by any active transform), V = M M^T the world covariance, J the EWA jacobian
+        # rebuilt from the unclamped p, and T = J W.
+        p = W * mean + trans
+        R = wp.quat_to_matrix(quats[q_idx])
+        s = glob_scale * scales[s_idx]
+        M = R * wp.diag(s)
         if moved:
-            g.M = R_tf * g.M
-            g.V = g.M * wp.transpose(g.M)
+            M = R_tf * M
+        V = M * wp.transpose(M)
+        rz = 1.0 / p[2]
+        rz2 = rz * rz
+        J = wp.mat33(fx * rz, 0.0, -fx * p[0] * rz2, 0.0, fy * rz, -fy * p[1] * rz2, 0.0, 0.0, 0.0)
+        T = J * W
         vcov2d = _vcov2d_from_conic(conics[c_idx], v_conic_in[vc_idx])
-        v_p, v_T, v_V = _proj_vjp(g, fx, fy, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d)
-        v_mean_world = wp.transpose(g.W) * v_p
-        v_M_world = _v_M_from_vV(v_V, g.M)
+        v_p, v_T, v_V = _proj_vjp(p, T, W, V, fx, fy, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d)
+        v_mean_world = wp.transpose(W) * v_p
+        v_M_world = _v_M_from_vV(v_V, M)
         v_mean_out = v_mean_world
         v_M = v_M_world
         if moved:
             v_mean_out = wp.transpose(R_tf) * v_mean_world
             v_M = wp.transpose(R_tf) * v_M_world
         v_mean3d[idx] = v_mean_out
-        vs, vq = _scale_quat_vjp(g, quats[q_idx], v_M, glob_scale)
+        vs, vq = _scale_quat_vjp(R, s, quats[q_idx], v_M, glob_scale)
         v_scale[idx] = vs
         v_quat[idx] = vq
-        v_R, v_t = _view_grad(g, mean, v_p, v_T)
+        v_R, v_t = _view_grad(J, mean, v_p, v_T)
         if moved:
-            M_local = wp.transpose(R_tf) * g.M
+            M_local = wp.transpose(R_tf) * M
             v_R_tf = wp.outer(v_mean_world, mean_local) + v_M_world * wp.transpose(M_local)
             v_t_tf = v_mean_world
     ob = image_id * 4
@@ -604,9 +538,9 @@ def _project_bwd_kernel(
         ob_tf = image_id * num_transforms + wp.max(tmin, 0)
     for i in range(3):
         for j in range(3):
-            s = wp.tile_sum(wp.tile(v_R[i, j]))
+            sr = wp.tile_sum(wp.tile(v_R[i, j]))
             if tr == 0:
-                wp.atomic_add(v_viewmat, ob + i, j, wp.tile_extract(s, 0))
+                wp.atomic_add(v_viewmat, ob + i, j, wp.tile_extract(sr, 0))
             if has_transforms:
                 stf = wp.tile_sum(wp.tile(mask * v_R_tf[i, j]))
                 if tr == 0 and uniform:
@@ -625,74 +559,6 @@ def _project_bwd_kernel(
             for j in range(3):
                 wp.atomic_add(v_transforms, out_tf, i, j, v_R_tf[i, j])
             wp.atomic_add(v_transforms, out_tf, i, 3, v_t_tf[i])
-
-
-@wp.struct
-class _Geom:
-    W: wp.mat33  # upper-left 3x3 of the row-major viewmat (camera rotation)
-    R: wp.mat33  # quaternion rotation
-    M: wp.mat33  # R diag(glob_scale * scale)
-    V: wp.mat33  # world covariance M M^T
-    J: wp.mat33  # EWA jacobian, rebuilt from the unclamped position
-    T: wp.mat33  # J W
-    tx: wp.float32  # camera-space position (unclamped)
-    ty: wp.float32
-    tz: wp.float32
-    rz2: wp.float32
-    rz3: wp.float32
-    sx: wp.float32  # glob_scale * scale
-    sy: wp.float32
-    sz: wp.float32
-
-
-@wp.func
-def _recompute_geom(
-    mean: wp.vec3,
-    quat: wp.vec4,
-    scale: wp.vec3,
-    W: wp.mat33,
-    trans: wp.vec3,
-    glob_scale: wp.float32,
-    fx: wp.float32,
-    fy: wp.float32,
-) -> _Geom:
-    g = _Geom()
-    g.W = W
-    tx = W[0, 0] * mean[0] + W[0, 1] * mean[1] + W[0, 2] * mean[2] + trans[0]
-    ty = W[1, 0] * mean[0] + W[1, 1] * mean[1] + W[1, 2] * mean[2] + trans[1]
-    tz = W[2, 0] * mean[0] + W[2, 1] * mean[1] + W[2, 2] * mean[2] + trans[2]
-    rz = 1.0 / tz
-    rz2 = rz * rz
-    g.tx = tx
-    g.ty = ty
-    g.tz = tz
-    g.rz2 = rz2
-    g.rz3 = rz2 * rz
-    J = wp.mat33(fx * rz, 0.0, -fx * tx * rz2, 0.0, fy * rz, -fy * ty * rz2, 0.0, 0.0, 0.0)
-    g.J = J
-    g.T = J * W
-    R = _quat_to_rotmat(quat)
-    g.R = R
-    sx = glob_scale * scale[0]
-    sy = glob_scale * scale[1]
-    sz = glob_scale * scale[2]
-    g.sx = sx
-    g.sy = sy
-    g.sz = sz
-    M = wp.mat33(
-        R[0, 0] * sx,
-        R[0, 1] * sy,
-        R[0, 2] * sz,
-        R[1, 0] * sx,
-        R[1, 1] * sy,
-        R[1, 2] * sz,
-        R[2, 0] * sx,
-        R[2, 1] * sy,
-        R[2, 2] * sz,
-    )
-    g.M = M
-    g.V = M * wp.transpose(M)
-    return g
 
 
 @wp.func
@@ -717,18 +583,27 @@ def _vcov2d_from_conic(conic: wp.vec3, v_conic: wp.vec3) -> wp.vec3:
 
 @wp.func
 def _proj_vjp(
-    g: _Geom, fx: wp.float32, fy: wp.float32, v_xy: wp.vec2, v_depth: wp.float32, vcov2d: wp.vec3
+    p: wp.vec3,
+    T: wp.mat33,
+    W: wp.mat33,
+    V: wp.mat33,
+    fx: wp.float32,
+    fy: wp.float32,
+    v_xy: wp.vec2,
+    v_depth: wp.float32,
+    vcov2d: wp.vec3,
 ) -> tuple[wp.vec3, wp.mat33, wp.mat33]:
     # Returns (v_p, v_T, v_V). v_p is the gradient wrt the camera-space position
     # (pixel + depth + EWA terms), used by the world-mean grad and the viewmat
     # translation grad. v_T is the gradient wrt T = J W, used by the viewmat
     # rotation grad. v_V is the gradient wrt the world covariance, used by
-    # scale and quat.
-    tx = g.tx
-    ty = g.ty
-    tz = g.tz
-    rz2 = g.rz2
-    rz3 = g.rz3
+    # scale and quat. p is the unclamped camera-space position.
+    tx = p[0]
+    ty = p[1]
+    tz = p[2]
+    rz = 1.0 / tz
+    rz2 = rz * rz
+    rz3 = rz2 * rz
     rw = 1.0 / (tz + 1e-6)
     vpx = fx * v_xy[0]
     vpy = fy * v_xy[1]
@@ -740,10 +615,10 @@ def _proj_vjp(
     v_cov = wp.mat33(
         vcov2d[0], 0.5 * vcov2d[1], 0.0, 0.5 * vcov2d[1], vcov2d[2], 0.0, 0.0, 0.0, 0.0
     )
-    Tt = wp.transpose(g.T)
-    v_V = Tt * v_cov * g.T
-    v_T = v_cov * g.T * g.V + wp.transpose(v_cov) * g.T * g.V
-    v_J = v_T * wp.transpose(g.W)
+    Tt = wp.transpose(T)
+    v_V = Tt * v_cov * T
+    v_T = v_cov * T * V + wp.transpose(v_cov) * T * V
+    v_J = v_T * wp.transpose(W)
     v_t_x = -fx * rz2 * v_J[0, 2]
     v_t_y = -fy * rz2 * v_J[1, 2]
     v_t_z = (
@@ -771,32 +646,33 @@ def _v_M_from_vV(v_V: wp.mat33, M: wp.mat33) -> wp.mat33:
 
 @wp.func
 def _scale_quat_vjp(
-    g: _Geom, quat: wp.vec4, v_M: wp.mat33, glob_scale: wp.float32
+    R: wp.mat33, s: wp.vec3, quat: wp.quat, v_M: wp.mat33, glob_scale: wp.float32
 ) -> tuple[wp.vec3, wp.vec4]:
-    # Returns (v_scale, v_quat). v_M is the cotangent of the local covariance
-    # factor M = R diag(glob_scale * scale), already rotated back into the local
-    # frame when a rigid transform moved the gaussian.
-    R = g.R
+    # Returns (v_scale, v_quat). v_M is the cotangent of the local covariance factor M = R diag(s)
+    # with s = glob_scale * scale, already rotated back into the local frame when a rigid transform
+    # moved the gaussian. v_quat is the analytic adjoint of the unit-quaternion rotation map,
+    # computed directly here rather than through wp.quat_to_matrix's adjoint so it keeps the radial
+    # component. R is the quaternion rotation.
     v_scale = wp.vec3(
         (R[0, 0] * v_M[0, 0] + R[1, 0] * v_M[1, 0] + R[2, 0] * v_M[2, 0]) * glob_scale,
         (R[0, 1] * v_M[0, 1] + R[1, 1] * v_M[1, 1] + R[2, 1] * v_M[2, 1]) * glob_scale,
         (R[0, 2] * v_M[0, 2] + R[1, 2] * v_M[1, 2] + R[2, 2] * v_M[2, 2]) * glob_scale,
     )
     v_R = wp.mat33(
-        v_M[0, 0] * g.sx,
-        v_M[0, 1] * g.sy,
-        v_M[0, 2] * g.sz,
-        v_M[1, 0] * g.sx,
-        v_M[1, 1] * g.sy,
-        v_M[1, 2] * g.sz,
-        v_M[2, 0] * g.sx,
-        v_M[2, 1] * g.sy,
-        v_M[2, 2] * g.sz,
+        v_M[0, 0] * s[0],
+        v_M[0, 1] * s[1],
+        v_M[0, 2] * s[2],
+        v_M[1, 0] * s[0],
+        v_M[1, 1] * s[1],
+        v_M[1, 2] * s[2],
+        v_M[2, 0] * s[0],
+        v_M[2, 1] * s[1],
+        v_M[2, 2] * s[2],
     )
-    w = quat[0]
-    x = quat[1]
-    y = quat[2]
-    z = quat[3]
+    x = quat[0]
+    y = quat[1]
+    z = quat[2]
+    w = quat[3]
     vq_w = 2.0 * (
         x * (v_R[2, 1] - v_R[1, 2]) + y * (v_R[0, 2] - v_R[2, 0]) + z * (v_R[1, 0] - v_R[0, 1])
     )
@@ -818,7 +694,7 @@ def _scale_quat_vjp(
         - 2.0 * z * (v_R[0, 0] + v_R[1, 1])
         + w * (v_R[1, 0] - v_R[0, 1])
     )
-    return v_scale, wp.vec4(vq_w, vq_x, vq_y, vq_z)
+    return v_scale, wp.vec4(vq_x, vq_y, vq_z, vq_w)
 
 
 @wp.func
@@ -859,7 +735,7 @@ def _load_W_trans(viewmat: wp.array2d[wp.float32], vb: wp.int32) -> tuple[wp.mat
 
 
 @wp.func
-def _view_grad(g: _Geom, mean: wp.vec3, v_p: wp.vec3, v_T: wp.mat33) -> tuple[wp.mat33, wp.vec3]:
+def _view_grad(J: wp.mat33, mean: wp.vec3, v_p: wp.vec3, v_T: wp.mat33) -> tuple[wp.mat33, wp.vec3]:
     # v_R = outer(v_p, mean) + J^T v_T and v_trans = v_p, see header derivation
-    v_R = wp.outer(v_p, mean) + wp.transpose(g.J) * v_T
+    v_R = wp.outer(v_p, mean) + wp.transpose(J) * v_T
     return v_R, v_p
