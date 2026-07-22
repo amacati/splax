@@ -29,7 +29,9 @@ from scipy.special import logit
 _C0 = 0.28209479177387814
 
 
-def fetch(url: str, *, cache: Path | None = None, force: bool = False) -> Path:
+def fetch(
+    url: str, *, cache: Path | None = None, force: bool = False, allow_unchecked: bool = False
+) -> Path:
     """Download ``url`` into a local cache and return the path to the cached file.
 
     A cached file is reused only while its stored ETag still matches the remote. When the remote
@@ -41,6 +43,7 @@ def fetch(url: str, *, cache: Path | None = None, force: bool = False) -> Path:
         url: URL to download.
         cache: Cache directory, overriding the environment-based default.
         force: Re-download and overwrite the cached copy even if it exists.
+        allow_unchecked: Serve a cached file as-is instead of revalidating it against the remote.
 
     Returns:
         Path to the cached file.
@@ -52,6 +55,8 @@ def fetch(url: str, *, cache: Path | None = None, force: bool = False) -> Path:
     name = Path(urllib.parse.urlparse(url).path).name
     path = cache / (hashlib.sha256(url.encode()).hexdigest()[:16] + "-" + name)
     token_path = cache / (path.name + ".etag")
+    if not force and allow_unchecked and path.exists():
+        return path
     with urllib.request.urlopen(urllib.request.Request(url, method="HEAD")) as resp:
         etag = resp.headers.get("ETag")
     if not force and path.exists() and token_path.exists() and token_path.read_text() == etag:

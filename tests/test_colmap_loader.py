@@ -1,23 +1,23 @@
 """COLMAP loader invariants for the ``colmap`` training-toolkit module.
 
-Requires the drone scene unzipped to ``data/drone/sparse/0``. Checks the pycolmap loader and the
-point-cloud init produce self-consistent, static shapes with the right conventions (no GPU and no
-render needed).
+Checks the pycolmap loader and the point-cloud init produce self-consistent, static shapes with the
+right conventions (no GPU and no render needed).
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from colmap import init_from_points, read_reconstruction
 from scipy.spatial.transform import Rotation
 
-SPARSE = Path(__file__).resolve().parents[1] / "data" / "drone" / "sparse" / "0"
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
-def test_parsers_and_conventions() -> None:
-    cams, imgs, (xyz, rgb, ids, _track_lens) = read_reconstruction(SPARSE)
+def test_parsers_and_conventions(drone_sparse: Path) -> None:
+    cams, imgs, (xyz, rgb, ids, _) = read_reconstruction(drone_sparse)
 
     assert len(cams) >= 1 and len(imgs) > 0 and xyz.shape[0] > 0
     assert xyz.shape[1] == 3 and rgb.shape == xyz.shape
@@ -37,8 +37,8 @@ def test_parsers_and_conventions() -> None:
     assert np.isclose(np.linalg.det(rot), 1.0, atol=1e-5)
 
 
-def test_point_init_static_shapes() -> None:
-    _cams, _imgs, (xyz, rgb, _ids, _track_lens) = read_reconstruction(SPARSE)
+def test_point_init_static_shapes(drone_sparse: Path) -> None:
+    _, _, (xyz, rgb, _, _) = read_reconstruction(drone_sparse)
     n = 8000
     p = init_from_points(xyz[:3000].astype(np.float32), rgb[:3000], n, 0.1, seed=0)
     assert p["means"].shape == (n, 3)

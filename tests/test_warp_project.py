@@ -22,23 +22,20 @@ whole file loudly when gsplat cannot run.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
+import _gsplat_ref as gref
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-import _gsplat_ref as gref  # noqa: E402
+import splax
 
-import splax  # noqa: E402
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # Every test here needs the gsplat reference, fail the whole module without it.
 gref.require_working(allow_module_level=True)
-
-LEGO = ROOT / "data/nerf_synthetic/lego"
 
 
 class _ProjArgs(TypedDict):
@@ -111,13 +108,12 @@ def test_parity_under_jit() -> None:
     _assert_parity(a, b)
 
 
-def test_parity_lego_slice() -> None:
-    meta = json.loads((LEGO / "transforms_test.json").read_text())
-    means, scales, quats, _colors, _opac = splax.io.load_ply(ROOT / "data/scenes/lego.ply")
+def test_parity_lego_slice(lego_meta: dict, lego_ply: Path) -> None:
+    means, scales, quats, _colors, _opac = splax.io.load_ply(lego_ply)
     means, scales, quats = means[:50_000], scales[:50_000], quats[:50_000]
-    frame = meta["frames"][0]
+    frame = lego_meta["frames"][0]
     W = H = 800
-    ff = 0.5 * W / np.tan(0.5 * meta["camera_angle_x"])
+    ff = 0.5 * W / np.tan(0.5 * lego_meta["camera_angle_x"])
     viewmat = jnp.asarray(splax.utils.nerf_camera(frame["transform_matrix"]))
     args: _ProjArgs = {
         **PROJ_ARGS,

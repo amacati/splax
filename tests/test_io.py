@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import http.server
 import threading
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import jax
@@ -29,6 +28,7 @@ from splax.io import fetch, load_ply
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from pathlib import Path
 
 
 def lookat_viewmats(center: np.ndarray, radius: float, num_views: int) -> jax.Array:
@@ -36,9 +36,6 @@ def lookat_viewmats(center: np.ndarray, radius: float, num_views: int) -> jax.Ar
     az = 2 * np.pi * np.arange(num_views)[:, None] / num_views
     eyes = center + radius * np.concatenate([np.sin(az), np.full_like(az, 0.3), np.cos(az)], axis=1)
     return jnp.asarray(splax.utils.look_at(eyes, center))
-
-
-LEGO_PLY = Path(__file__).resolve().parents[1] / "data/scenes/lego.ply"
 
 
 def _render(
@@ -92,9 +89,9 @@ def test_write_ply_is_load_ply_inverse(tmp_path: Path) -> None:
     np.testing.assert_allclose(lo, opac, rtol=1e-4, atol=1e-4)
 
 
-def test_ply_render_roundtrip(tmp_path: Path) -> None:
+def test_ply_render_roundtrip(tmp_path: Path, lego_ply: Path) -> None:
     """Fit-free: load lego.ply, write copy, reload, identical render."""
-    splats = load_ply(LEGO_PLY)
+    splats = load_ply(lego_ply)
     copy = tmp_path / "lego_copy.ply"
     splax.io.write_ply(copy, *splats)
     splats2 = load_ply(copy)
@@ -170,6 +167,23 @@ def test_fetch_cache_hit(file_server: tuple[Path, str, list[str]], tmp_path: Pat
 
     assert second == first
     assert len(requests) == 1  # No new request on the cache hit.
+
+
+def test_fetch_unchecked_serves_cache(
+    file_server: tuple[Path, str, list[str]], tmp_path: Path
+) -> None:
+    """allow_unchecked serves the cache without contacting the remote, even once that is gone."""
+    srv_dir, url, requests = file_server
+    (srv_dir / "scene.ply").write_bytes(b"splat bytes")
+    cache = tmp_path / "cache"
+
+    fetch(f"{url}/scene.ply", cache=cache)
+    (srv_dir / "scene.ply").unlink()
+
+    unchecked = fetch(f"{url}/scene.ply", cache=cache, allow_unchecked=True)
+
+    assert unchecked.read_bytes() == b"splat bytes"
+    assert len(requests) == 1
 
 
 def test_fetch_force_redownloads(file_server: tuple[Path, str, list[str]], tmp_path: Path) -> None:

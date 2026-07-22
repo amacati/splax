@@ -6,8 +6,6 @@ pose with respect to the viewmat. Covers single-view and batched gradients.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import _gsplat_ref as gref
@@ -21,10 +19,8 @@ import splax
 
 if TYPE_CHECKING:
     import types
+    from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-LEGO = ROOT / "data/nerf_synthetic/lego"
-PLY = ROOT / "data/scenes/lego.ply"
 HEIGHT = WIDTH = 800
 TARGET_OFFSET = jnp.array([0.01, -0.01, 0.01, 0.01, -0.01, 0.01])
 
@@ -36,18 +32,19 @@ def gsplat_ref() -> types.ModuleType:
     return gref
 
 
-def _lego_scene() -> tuple[tuple[jax.Array, ...], np.ndarray, float]:
+def _lego_scene(lego_meta: dict, lego_ply: Path) -> tuple[tuple[jax.Array, ...], np.ndarray, float]:
     """Load the pretrained lego splat and the frame-0 test pose (viewmat, focal)."""
-    meta = json.loads((LEGO / "transforms_test.json").read_text())
-    gaussians = splax.io.load_ply(PLY)
-    viewmat = splax.utils.nerf_camera(meta["frames"][0]["transform_matrix"])
-    focal = float(0.5 * WIDTH / np.tan(0.5 * meta["camera_angle_x"]))
+    gaussians = splax.io.load_ply(lego_ply)
+    viewmat = splax.utils.nerf_camera(lego_meta["frames"][0]["transform_matrix"])
+    focal = float(0.5 * WIDTH / np.tan(0.5 * lego_meta["camera_angle_x"]))
     return gaussians, viewmat, focal
 
 
-def test_lego_viewmat_grad_gsplat_parity(gsplat_ref: types.ModuleType) -> None:
+def test_lego_viewmat_grad_gsplat_parity(
+    gsplat_ref: types.ModuleType, lego_meta: dict, lego_ply: Path
+) -> None:
     """Single-view and vmap-batched viewmat gradients must match gsplat's autograd."""
-    (means, scales, quats, colors, opacities), viewmat, focal = _lego_scene()
+    (means, scales, quats, colors, opacities), viewmat, focal = _lego_scene(lego_meta, lego_ply)
     camera_kwargs = {
         "background": jnp.ones(3),
         "img_shape": (HEIGHT, WIDTH),

@@ -18,12 +18,9 @@ tests/_gsplat_ref.py.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 import _gsplat_ref as gref
-import imageio.v3 as iio
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -35,12 +32,10 @@ import splax._cache as _cache
 import splax._rasterize._sort._sort as _sort
 from splax._rasterize._sort._kernels import _map_intersects_64bit
 
-ROOT = Path(__file__).resolve().parents[1]
-
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
     from types import ModuleType
-
-LEGO = ROOT / "data/nerf_synthetic/lego"
 
 
 class _ProjKW(TypedDict):
@@ -294,9 +289,9 @@ def test_packed_vs_64bit_random() -> None:
     assert psnr > 65, f"packed vs 64-bit PSNR only {psnr:.1f} dB"
 
 
-def test_packed_vs_64bit_lego() -> None:
+def test_packed_vs_64bit_lego(lego_ply: Path) -> None:
     """Packed vs 64-bit on the real lego scene (tight key emission)."""
-    means, scales, quats, colors, opac = splax.io.load_ply(ROOT / "data/scenes/lego.ply")
+    means, scales, quats, colors, opac = splax.io.load_ply(lego_ply)
     H, W = 720, 1280
     viewmat = jnp.asarray(
         np.array([[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 6.0], [0, 0, 0, 1]], np.float32)
@@ -372,19 +367,23 @@ def _id_viewmat(dz: float = 5.0) -> jax.Array:
     return jnp.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, dz], [0, 0, 0, 1]], jnp.float32)
 
 
-def test_render_lego_vs_gsplat(gsplat_ref: ModuleType) -> None:
+def test_render_lego_vs_gsplat(
+    gsplat_ref: ModuleType,
+    lego_meta: dict,
+    lego_view: Callable[[str], np.ndarray],
+    lego_ply: Path,
+) -> None:
     """Splax vs gsplat full render on the real lego scene, from a dataset pose.
 
     A realistic-scene perceptual check to complement the random-scene parity and
     the GT-PSNR regression gate (tests/test_lego_regression.py). Different kernels,
     so bounded by PSNR rather than exactly.
     """
-    meta = json.loads((LEGO / "transforms_test.json").read_text())
-    means, scales, quats, colors, opac = splax.io.load_ply(ROOT / "data/scenes/lego.ply")
-    frame = meta["frames"][0]
-    gt = iio.imread(LEGO / (frame["file_path"].lstrip("./") + ".png"))
+    means, scales, quats, colors, opac = splax.io.load_ply(lego_ply)
+    frame = lego_meta["frames"][0]
+    gt = lego_view(frame["file_path"])
     H, W = gt.shape[:2]
-    ff = 0.5 * W / np.tan(0.5 * meta["camera_angle_x"])
+    ff = 0.5 * W / np.tan(0.5 * lego_meta["camera_angle_x"])
     kw: _RenderKW = {
         "viewmat": jnp.asarray(splax.utils.nerf_camera(frame["transform_matrix"])),
         "background": jnp.ones(3),
