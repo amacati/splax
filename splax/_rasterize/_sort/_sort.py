@@ -7,7 +7,7 @@ readback.
 
 import warp as wp
 
-from splax._cache import _cached_launch, _get_scratch, _read_count_begin, _read_count_end
+from splax._cache import begin_count_read, cached_launch, cached_scratch, fetch_count_read
 from splax._rasterize._sort._kernels import (
     _MINMAX_CHUNK,
     _depth_minmax,
@@ -67,28 +67,30 @@ def _sort_and_bin(
     # copy is enqueued first and the wait happens below, so the tile_bins memset
     # and the depth range pre-pass execute inside the sync bubble while the host
     # waits for the scan result.
-    pending = _read_count_begin(cum_tiles_hit, total - 1, device)
+    pending = begin_count_read(cum_tiles_hit, total - 1, device)
 
     isect_dtype = wp.int32 if packed else wp.int64
-    scratch = _get_scratch(device, (B, n, num_tiles), 2, bins_len, isect_dtype)
-    # tile_bins is allocated at exactly bins_len for this signature.
+    scratch = cached_scratch(device, (B, n, num_tiles), 2, bins_len, isect_dtype)
+    # tile_bins persists across frames and the bin-edge kernel writes only bins that own
+    # intersections, so zero the previous frame's stale edges.
     tile_bins = scratch["tile_bins"]
     tile_bins.zero_()
     if packed:
-        # Device-side per-image [dmin, dmax] for the depth quantization, no host
-        # sync. Count-independent, so it launches before the readback wait.
+        # Per-image [dmin, dmax] for the depth quantization, computed device-side with no host sync.
+        # Count-independent, so it launches before the readback wait. depth_mm persists across
+        # frames and its reduction is an atomic min-max, so seed the sentinels before accumulating.
         depth_mm = scratch["depth_mm"]
-        _cached_launch(_seed_minmax, B, [depth_mm], device)
-        _cached_launch(
+        cached_launch(_seed_minmax, B, [depth_mm], device)
+        cached_launch(
             _depth_minmax,
             (total + int(_MINMAX_CHUNK) - 1) // int(_MINMAX_CHUNK),
             [depths, radii, total, n, depth_mm],
             device,
         )
 
-    num_intersects = _read_count_end(pending)
+    num_intersects = fetch_count_read(pending)
     # Grow the sort buffers to the frame's count. Nothing above needs them.
-    scratch = _get_scratch(
+    scratch = cached_scratch(
         device, (B, n, num_tiles), max(2 * num_intersects, 2), bins_len, isect_dtype
     )
     # The grow above always allocates, so the sort buffers are live from here on.
@@ -104,7 +106,7 @@ def _sort_and_bin(
     # [0, 2*num_intersects) and the stable shapes keep the recorded launches from
     # repacking their array arguments each frame.
     if packed:
-        _cached_launch(
+        cached_launch(
             _map_intersects_32bit,
             total,
             [
@@ -127,14 +129,14 @@ def _sort_and_bin(
             device,
         )
         wp.utils.radix_sort_pairs(isect_ids, gaussian_ids, num_intersects)
-        _cached_launch(
+        cached_launch(
             _tile_bin_edges_32bit,
             num_intersects,
             [num_intersects, isect_ids, num_tiles, tile_n_bits, depth_bits, tile_bins],
             device,
         )
     else:
-        _cached_launch(
+        cached_launch(
             _map_intersects_64bit,
             total,
             [
@@ -155,7 +157,7 @@ def _sort_and_bin(
             device,
         )
         wp.utils.radix_sort_pairs(isect_ids, gaussian_ids, num_intersects)
-        _cached_launch(
+        cached_launch(
             _tile_bin_edges_64bit,
             num_intersects,
             [num_intersects, isect_ids, num_tiles, tile_n_bits, tile_bins],

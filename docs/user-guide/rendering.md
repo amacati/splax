@@ -98,5 +98,5 @@ public.
 - `splax.rasterize` blends the projected gaussians into the `(H, W, 3)` image.
 
 The Warp backend caches grow-only sort and bin scratch across renders.
-`splax.clear_scratch` releases it, for example before switching to a very
+`splax.clear_cache` releases it, for example before switching to a very
 different workload size.

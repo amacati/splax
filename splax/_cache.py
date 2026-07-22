@@ -1,15 +1,40 @@
 """Warp backend caches shared by the rasterization pipeline.
 
-Three per-device caches keep the render loop off the allocator and the launch fast path:
-recorded kernel launches that replay with only the changed arguments repacked, grow-only sort and
-bin scratch buffers keyed on the workload shape, and a pinned staging element for the one
-intersection-count readback. All three are purged together, so a recorded launch never keeps a
-freed scratch buffer alive through its retained argument list.
+Rasterization first sorts the Gaussians and computes the total intersection count. The count is read
+back on the host to size the pipeline buffers. Warp cannot update a captured CUDA graph, so the
+pipeline launches its kernels individually once the count is known. To accelerate the launches as
+much as possible, we keep three per-device caches that avoid allocations and kernel repacks.
+
+The launch cache records each kernel as a Warp launch object keyed on kernel and device. A full
+wp.launch repacks and validates every argument and costs 5 to 16 us of host time per launch. A
+recorded launch replays in about 2 us and repacks only the arguments whose recorded state changed
+since the previous call. Most inputs stay fixed across frames, so the diff repacks little.
+
+The scratch cache holds the sort and bin buffers keyed on the workload shape over batch size,
+Gaussian count, and tile count. The buffers are reused across renders and only grow, which avoids a
+cold reallocation of several gigabytes each frame. A change in workload shape drops the whole entry.
+An intersection count above the current capacity reallocates the sort buffers with headroom, at the
+cost of a longer compute time on that call.
+
+The readback cache holds one pinned int32 staging element per device for the single
+intersection-count copy, fenced with an event. A pageable readback allocates every frame and costs
+about 17 us of host time, while the pinned copy and its event sync cost about 6 us.
+
+A recorded launch retains raw pointers into the scratch buffers, so the launch cache and the scratch
+cache are purged together whenever the scratch buffers move. The readback cache holds no such
+references and is independent of the other two.
 """
+
+from __future__ import annotations
 
 from typing import TypedDict
 
 import warp as wp
+
+_SCRATCH_HEADROOM = 1.25
+_scratch_cache: dict[str, _ScratchEntry] = {}  # Persistent grow-only scratch cache
+_launch_cache: dict = {}  # Recorded per-kernel launches, keyed on (kernel, device)
+_readback_bufs: dict = {}  # Pinned staging element per device for the intersection-count readback
 
 
 class _ScratchEntry(TypedDict):
@@ -18,50 +43,63 @@ class _ScratchEntry(TypedDict):
     sig: tuple
     isect_cap: int
     isect_dtype: type
-    isect_ids: wp.array | None
-    gaussian_ids: wp.array | None
-    tile_bins: wp.array
-    depth_mm: wp.array
+    isect_ids: wp.array | None  # radix sort key buffer
+    gaussian_ids: wp.array | None  # radix sort value buffer, same length as isect_ids
+    tile_bins: wp.array  # per-image per-tile bin edges of length B*num_tiles
+    depth_mm: wp.array  # per-image [dmin, dmax] for the packed depth quantization
 
 
-# Persistent grow-only scratch cache. The pipeline needs three buffers whose sizes depend on the
-# data-dependent intersection count:
-#   isect_ids / gaussian_ids  radix sort key and value ping-pong buffers. Warp's radix_sort_pairs
-#     mandates a 2*count backing array because it drives a cub::DoubleBuffer internally.
-#   tile_bins  per-image per-tile bin edges of length B*num_tiles.
-# Re-allocating from the mempool every frame costs a cold ~14 ms re-malloc of ~3 GB at B=8, 1M
-# gaussians, and 1080p. One set of buffers is kept per device, keyed on the static shape signature
-# over B, N, and num_tiles. Callers invoke this from jitted functions, so the signature is fixed per
-# compiled executable and repeated calls reuse stable buffers. A signature change drops everything,
-# so a big config's scratch never lingers into a smaller one. Within one signature the sort buffers
-# track the running max intersection count with 1.25x headroom.
-# The sort buffers are fully overwritten in their valid prefix every frame, so there is no stale
-# data hazard. tile_bins is the exception. The bin-edge kernel only touches bins that own
-# intersections, so the used prefix must be zeroed each frame.
-_SCRATCH_HEADROOM = 1.25
-_scratch_cache: dict[str, _ScratchEntry] = {}
+def cached_scratch(
+    device: wp.Device | None,
+    sig: tuple,
+    isect_need: int,
+    bins_need: int,
+    isect_dtype: type = wp.int64,
+) -> _ScratchEntry:
+    key = str(device)  # wp.Device itself is unhashable
+    entry = _scratch_cache.get(key)
+    if entry is None or entry["sig"] != sig:
+        # New workload signature. Drop everything first to avoid transient peaks. Purge the recorded
+        # launches first, they hold the old array references.
+        _launch_cache.clear()
+        _scratch_cache.pop(key, None)
+        entry: _ScratchEntry = {
+            "sig": sig,
+            "isect_cap": 0,
+            "isect_dtype": isect_dtype,
+            "isect_ids": None,
+            "gaussian_ids": None,
+            "tile_bins": wp.empty(bins_need, dtype=wp.vec2i, device=device),
+            "depth_mm": wp.empty(2 * max(sig[0], 1), dtype=wp.float32, device=device),
+        }
+        _scratch_cache[key] = entry
+    if entry["isect_cap"] < isect_need or entry["isect_dtype"] != isect_dtype:
+        # Grow the buffer with headroom to avoid reallocation for slighly larger counts.
+        cap = max(int(isect_need * _SCRATCH_HEADROOM) + 1, entry["isect_cap"])
+        # Sort buffers move on realloc, so recorded launches must drop their
+        # references to the old buffers before the free below.
+        _launch_cache.clear()
+        # Free before allocating larger, avoiding an old plus new transient peak.
+        entry["isect_ids"] = None
+        entry["gaussian_ids"] = None
+        entry["isect_cap"] = 0
+        entry["isect_dtype"] = isect_dtype
+        entry["isect_ids"] = wp.empty(cap, dtype=isect_dtype, device=device)
+        entry["gaussian_ids"] = wp.empty(cap, dtype=wp.int32, device=device)
+        entry["isect_cap"] = cap
+    return entry
 
-# Recorded per-kernel launches, keyed on (kernel, device). Each entry is a
-# (wp.Launch, state) pair, where state holds the dim followed by one entry per
-# argument, arrays as (ptr, shape) and scalars by value. wp.launch resolves the
-# device, module, and hooks and repacks every argument on each call, which costs
-# 5 to 16 us of host time per launch on kernels with many arguments. A recorded
-# wp.Launch replays in about 2 us, and diffing against the state repacks only
-# the arguments that changed. Repacking all arguments through set_params instead
-# costs 50 to 60 us more per frame over the five pipeline launches, so the diff
-# is load-bearing. Purged together with the scratch cache so a recorded launch
-# never keeps a freed scratch buffer alive through its retained argument list.
-_launch_cache: dict = {}
 
-
-def _cached_launch(
+def cached_launch(
     kernel: wp.Kernel, dim: int, args: list, device: wp.Device | None, block_dim: int = 0
 ) -> None:
     """Launch a kernel through its recorded per-device launch object.
 
-    Records the launch on first use and afterwards replays it, repacking only the
-    arguments whose recorded state changed. FFI callbacks are serialized by
-    Warp's callback lock, so the state needs no locking of its own.
+    Records the launch on first use and afterwards replays it, repacking only the arguments whose
+    recorded state changed. FFI callbacks are serialized by Warp's callback lock.
+
+    Entries are keyed on (kernel, device) and the static shape signatures, and drop entries if the
+    signature changes.
     """
     entry = _launch_cache.get((kernel, str(device)))
     if entry is None:
@@ -71,6 +109,8 @@ def _cached_launch(
             )
         else:
             launch = wp.launch(kernel, dim=dim, inputs=args, device=device, record_cmd=True)
+        # State holds the launch dim followed by one entry per argument, arrays as (ptr, shape) and
+        # scalars by value.
         state = [dim] + [(a.ptr, a.shape) if isinstance(a, wp.array) else a for a in args]
         _launch_cache[(kernel, str(device))] = (launch, state)
         launch.launch()
@@ -87,20 +127,12 @@ def _cached_launch(
     launch.launch()
 
 
-# One pinned int32 staging element per device for the intersection-count
-# readback, with an event fencing the copy. A pageable slice.numpy() readback
-# allocates on every frame and costs about 17 us of host time on an idle
-# stream, the pinned copy plus event sync about 6 us. The begin/end split lets
-# the caller enqueue count-independent kernels between the copy and the wait,
-# so they execute inside the sync bubble without delaying the readback.
-_readback_bufs: dict = {}
-
-
-def _read_count_begin(src: wp.array, index: int, device: wp.Device | None) -> tuple | int:
+def begin_count_read(src: wp.array, index: int, device: wp.Device | None) -> tuple | int:
     """Enqueue the one-element readback copy and fence it with an event.
 
-    On non-CUDA devices the read is synchronous and the value is returned
-    directly. Pass the result to _read_count_end for the integer either way.
+    On non-CUDA devices the read is synchronous. Pass the result to fetch_count_read to get the
+    result. Count-independent kernels can be launched between the begin and fetch calls, so they
+    execute inside the sync bubble without delaying the readback.
     """
     if device is None or not device.is_cuda:
         return int(src[index : index + 1].numpy()[0])
@@ -115,7 +147,7 @@ def _read_count_begin(src: wp.array, index: int, device: wp.Device | None) -> tu
     return buf
 
 
-def _read_count_end(pending: tuple | int) -> int:
+def fetch_count_read(pending: tuple | int) -> int:
     """Wait for the readback copy and return the count."""
     if isinstance(pending, int):
         return pending
@@ -123,53 +155,10 @@ def _read_count_end(pending: tuple | int) -> int:
     return int(pending[1][0])
 
 
-def _get_scratch(
-    device: wp.Device | None,
-    sig: tuple,
-    isect_need: int,
-    bins_need: int,
-    isect_dtype: type = wp.int64,
-) -> _ScratchEntry:
-    key = str(device)  # wp.Device is unhashable, its string alias is stable
-    entry = _scratch_cache.get(key)
-    if entry is None or entry["sig"] != sig:
-        # New workload signature. Drop everything first so the peak is the new
-        # size, not old plus new. Purge the recorded launches first, they hold
-        # the old array references.
-        _launch_cache.clear()
-        _scratch_cache.pop(key, None)
-        entry: _ScratchEntry = {
-            "sig": sig,
-            "isect_cap": 0,
-            "isect_dtype": isect_dtype,
-            "isect_ids": None,
-            "gaussian_ids": None,
-            "tile_bins": wp.empty(bins_need, dtype=wp.vec2i, device=device),
-            "depth_mm": wp.empty(2 * max(sig[0], 1), dtype=wp.float32, device=device),
-        }
-        _scratch_cache[key] = entry
-    if entry["isect_cap"] < isect_need or entry["isect_dtype"] != isect_dtype:
-        cap = max(int(isect_need * _SCRATCH_HEADROOM) + 1, entry["isect_cap"])
-        # Sort buffers move on realloc, so recorded launches must drop their
-        # references to the old buffers before the free below.
-        _launch_cache.clear()
-        # Free before allocating larger, avoiding an old plus new transient peak.
-        entry["isect_ids"] = None
-        entry["gaussian_ids"] = None
-        entry["isect_cap"] = 0
-        entry["isect_dtype"] = isect_dtype
-        entry["isect_ids"] = wp.empty(cap, dtype=isect_dtype, device=device)
-        entry["gaussian_ids"] = wp.empty(cap, dtype=wp.int32, device=device)
-        entry["isect_cap"] = cap
-    return entry
+def clear_cache() -> None:
+    """Release the persistent sort and bin scratch cache buffers on all devices.
 
-
-def clear_scratch() -> None:
-    """Release the persistent sort and bin scratch buffers on all devices.
-
-    The backend caches grow-only scratch across renders. Call this to reclaim that
-    memory, for example before switching to a very different workload size. Also
-    purges the recorded launch cache, which references the freed scratch buffers.
+    Also purges the recorded launch cache to prevent referencing freed buffers.
     """
     _launch_cache.clear()
     _scratch_cache.clear()

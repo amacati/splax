@@ -33,5 +33,5 @@ gradients. The reduction depends on how an input is batched.
 
 A batched launch renders all `B` cameras together, so the sort and blend scratch
 scale with the batch size. At large `B` this raises the peak memory footprint
-relative to looping one camera at a time. `splax.clear_scratch` releases the
+relative to looping one camera at a time. `splax.clear_cache` releases the
 cached scratch buffers when switching between very different batch sizes.

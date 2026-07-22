@@ -28,13 +28,13 @@ os.environ["SCIPY_ARRAY_API"] = "1"
 import scipy  # noqa: F401, ensure scipy uses array API features
 
 from splax import io, mcmc, utils
-from splax._cache import clear_scratch
+from splax._cache import clear_cache
 from splax._project import opacity_compensation, project
 from splax._rasterize import rasterize, rasterize_depth
 from splax._render import render, render_log
 
 __all__ = [
-    "clear_scratch",
+    "clear_cache",
     "opacity_compensation",
     "project",
     "rasterize",

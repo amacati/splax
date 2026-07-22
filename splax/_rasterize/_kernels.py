@@ -18,7 +18,7 @@ import warp as wp
 from warp import JaxCallableGraphMode, jax_callable
 
 from splax._batching import nested_vmap
-from splax._cache import _cached_launch
+from splax._cache import cached_launch
 from splax._intersect import BLOCK_SIZE, BLOCK_WIDTH
 from splax._rasterize._sort import _sort_and_bin
 
@@ -66,7 +66,7 @@ def _rasterize_warp(
         colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B, img_h, img_w
     )
 
-    _cached_launch(
+    cached_launch(
         _rasterize_kernel,
         B * num_tiles,
         [
@@ -250,7 +250,7 @@ def _rasterize_depth_warp(
         colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B, img_h, img_w
     )
 
-    _cached_launch(
+    cached_launch(
         _rasterize_depth_kernel,
         B * num_tiles,
         [
@@ -491,7 +491,7 @@ def _rasterize_bwd_warp(
     # Kernel choice by mean tile range. Below one staged batch per tile the
     # warp-aggregated walk wins, above it the staged lockstep walk does.
     if num_intersects < B_geom * num_tiles * int(BLOCK_SIZE):
-        _cached_launch(
+        cached_launch(
             _rasterize_bwd_agg_kernel,
             B_out * num_tiles * int(_SUBTILES),
             [
@@ -524,7 +524,7 @@ def _rasterize_bwd_warp(
             block_dim=32,
         )
         return
-    _cached_launch(
+    cached_launch(
         _rasterize_bwd_kernel,
         B_out * num_tiles,
         [
@@ -897,7 +897,7 @@ def _rasterize_bwd_depth_warp(
         return
     # Kernel choice by mean tile range, as in _rasterize_bwd_warp.
     if num_intersects < B_geom * num_tiles * int(BLOCK_SIZE):
-        _cached_launch(
+        cached_launch(
             _rasterize_bwd_depth_agg_kernel,
             B_out * num_tiles * int(_SUBTILES),
             [
@@ -934,7 +934,7 @@ def _rasterize_bwd_depth_warp(
             block_dim=32,
         )
         return
-    _cached_launch(
+    cached_launch(
         _rasterize_bwd_depth_kernel,
         B_out * num_tiles,
         [

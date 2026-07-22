@@ -254,7 +254,7 @@ def test_render_vmap_packed_matches_stack(monkeypatch: pytest.MonkeyPatch) -> No
     ref = jnp.stack(
         [splax.render(m, s, q, c, o, viewmat=views[i], **kw)[0] for i in range(B)]
     )  # B=1 renders each pack with depth_bits=21
-    splax.clear_scratch()
+    splax.clear_cache()
     out = np.asarray(
         jax.jit(jax.vmap(lambda vm: splax.render(m, s, q, c, o, viewmat=vm, **kw)[0]))(views)
     )  # B=8 render packs with depth_bits=18 (image 3 + tile 10)
@@ -264,4 +264,4 @@ def test_render_vmap_packed_matches_stack(monkeypatch: pytest.MonkeyPatch) -> No
     psnr = 99.0 if mse == 0 else -10 * np.log10(mse)
     assert d.max() < 0.05, f"packed batched vs stacked max abs diff {d.max():.2e}"
     assert psnr > 65, f"packed batched vs stacked PSNR only {psnr:.1f} dB"
-    splax.clear_scratch()
+    splax.clear_cache()

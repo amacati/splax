@@ -227,7 +227,7 @@ def test_scratch_reuse_across_sizes() -> None:
         # render while scratch is warm from previous (differently sized) iterations
         warm = _splax_rast(scene)
         # clean reference: drop all cached scratch, render the identical scene again
-        splax.clear_scratch()
+        splax.clear_cache()
         cold = _splax_rast(scene)
         assert np.array_equal(warm, cold), (
             f"scratch reuse changed output at n={n} {H}x{W}: max|d|={np.abs(warm - cold).max():.2e}"
@@ -237,7 +237,7 @@ def test_scratch_reuse_across_sizes() -> None:
 def test_scratch_dropped_on_signature_change() -> None:
     """Test that switching to a smaller workload releases a bigger sort scratch."""
     dev = wp.get_device()
-    splax.clear_scratch()
+    splax.clear_cache()
     _splax_rast(_random_scene(500_000, 1080, 1920, seed=1))
     big = wp.get_mempool_used_mem_current(dev)
     _splax_rast(_random_scene(5_000, 128, 128, seed=2))
@@ -254,15 +254,15 @@ def _rasterize_both_keymodes(
     """Rasterize the same inputs with the packed 32-bit key and the 64-bit key."""
     orig = _sort._use_32bit_keys
     try:
-        splax.clear_scratch()
+        splax.clear_cache()
         _sort._use_32bit_keys = lambda depth_bits: depth_bits >= 16  # ty: ignore[invalid-assignment]
         packed = np.asarray(splax.rasterize(*args, **kw))
-        splax.clear_scratch()
+        splax.clear_cache()
         _sort._use_32bit_keys = lambda depth_bits: False  # ty: ignore[invalid-assignment]
         wide = np.asarray(splax.rasterize(*args, **kw))
     finally:
         _sort._use_32bit_keys = orig
-        splax.clear_scratch()
+        splax.clear_cache()
     return packed, wide
 
 
@@ -349,19 +349,19 @@ def test_packed_fallback_triggers_when_bits_dont_fit() -> None:
     }
 
     # B=1 packs into int32 scratch
-    splax.clear_scratch()
+    splax.clear_cache()
     img, _ = splax.render(m, s, q, c, o, viewmat=_id_viewmat(), **kw)
     img.block_until_ready()
     assert _cache._scratch_cache[dev]["isect_dtype"] == wp.int32
 
     # B=8: image(3)+tile(13)=16 > 15, falls back to int64 scratch
-    splax.clear_scratch()
+    splax.clear_cache()
     views = jnp.stack([_id_viewmat(dz=5.0 + 0.1 * i) for i in range(8)])
     jax.jit(jax.vmap(lambda vm: splax.render(m, s, q, c, o, viewmat=vm, **kw)[0]))(
         views
     ).block_until_ready()
     assert _cache._scratch_cache[dev]["isect_dtype"] == wp.int64
-    splax.clear_scratch()
+    splax.clear_cache()
 
 
 def _norm_quats(q: jax.Array) -> jax.Array:
