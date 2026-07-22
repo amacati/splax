@@ -19,7 +19,6 @@ dependencies = [
     "jax[cuda12]>=0.10",
     "imageio",
     "plyfile",
-    "matplotlib>=3.11.0",
     "warp-lang>=1.14.0",
 ]
 
@@ -37,72 +36,15 @@ Repository = "https://github.com/learnsyslab/splax"
 requires = ["setuptools>=61.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[tool.ruff]
-# Exclude a variety of commonly ignored directories.
-exclude = [
-    ".git",
-    ".git-rewrite",
-    ".ipynb_checkpoints",
-    ".pyenv",
-    ".pytest_cache",
-    ".pytype",
-    ".ruff_cache",
-    ".venv",
-    ".vscode",
-    "__pypackages__",
-    "_build",
-    "build",
-    "dist",
-    "site-packages",
-    "venv",
-    "docs/conf.py",
-]
+[tool.setuptools.packages]
+find = {include = ["splax*"]}
 
-line-length = 100
-indent-width = 4
-target-version = "py312"
+[tool.setuptools.dynamic]
+version = {attr = "splax.__version__"}
 
-[tool.ruff.lint]
-select = ["E", "F", "I", "D", "TCH", "ANN"]
-ignore = ["ANN401"]
-fixable = ["ALL"]
-unfixable = []
-
-[tool.ruff.lint.isort]  # Prevent ruff from reporting conflicting settings with isort
-split-on-trailing-comma = false
-
-[tool.ruff.lint.per-file-ignores]
-"benchmark/*" = ["D100", "D103"]
-"tests/*" = ["D100", "D103", "D104"]
-"examples/*" = ["D100", "D103"]
-"tutorials/*" = ["D", "ANN"]
-# TODO: Remove once everything is stable and document
-"crazyflow/*" = ["D100", "D101", "D102", "D104", "D107"]
-
-[tool.ruff.lint.pydocstyle]
-convention = "google"
-
-[tool.ruff.lint.flake8-annotations]
-suppress-dummy-args = true
-suppress-none-returning = true
-
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "space"
-skip-magic-trailing-comma = true
-line-ending = "auto"
-docstring-code-format = true
-docstring-code-line-length = "dynamic"
-
-[tool.ty.src]
-# The Warp-DSL kernel modules are excluded. Their kernel bodies are written in warp's kernel
-# language, which warp's type stubs cannot type.
-exclude = [
-    "splax/_intersect.py",
-    "splax/_project/_kernels.py",
-    "splax/_rasterize/_kernels.py",
-    "splax/_rasterize/_sort/_kernels.py",
-]
+[tool.pytest.ini_options]
+# The training-toolkit tests import make_step and the exposure helpers from scripts/train_colmap.py
+pythonpath = ["scripts"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
@@ -217,6 +159,7 @@ pytest = "*"
 cuda-nvcc = "12.8.*"
 cuda-cudart-dev = "12.8.*"
 cuda-cccl = "12.8.*"
+matplotlib = "*"
 
 [tool.pixi.feature.tests]
 platforms = ["linux-64-cuda"]
@@ -260,12 +203,69 @@ tests = { features = ["cuda", "tests"], solve-group = "tests" }
 lint = { features = ["lint"], solve-group = "lint" }
 dist = { features = ["cuda", "dist"], solve-group = "dist" }
 
-[tool.pytest.ini_options]
-# The training-toolkit tests import make_step and the exposure helpers from scripts/train_colmap.py
-pythonpath = ["scripts"]
+[tool.ruff]
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".git",
+    ".git-rewrite",
+    ".ipynb_checkpoints",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "_build",
+    "build",
+    "dist",
+    "site-packages",
+    "venv",
+    "docs/conf.py",
+]
 
-[tool.setuptools.packages]
-find = {include = ["splax*"]}
+line-length = 100
+indent-width = 4
+target-version = "py312"
 
-[tool.setuptools.dynamic]
-version = {attr = "splax.__version__"}
+[tool.ruff.lint]
+select = ["E", "F", "I", "D", "TCH", "ANN"]
+ignore = ["ANN401"]
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.isort]  # Prevent ruff from reporting conflicting settings with isort
+split-on-trailing-comma = false
+
+[tool.ruff.lint.per-file-ignores]
+"benchmark/*" = ["D100", "D103"]
+"tests/*" = ["D100", "D103", "D104"]
+"examples/*" = ["D100", "D103"]
+"tutorials/*" = ["D", "ANN"]
+# TODO: Remove once everything is stable and document
+"crazyflow/*" = ["D100", "D101", "D102", "D104", "D107"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-annotations]
+suppress-dummy-args = true
+suppress-none-returning = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = true
+line-ending = "auto"
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+
+[tool.ty.src]
+# The Warp-DSL kernel modules are excluded. Their kernel bodies are written in warp's kernel
+# language, which warp's type stubs cannot type.
+exclude = [
+    "splax/_intersect.py",
+    "splax/_project/_kernels.py",
+    "splax/_rasterize/_kernels.py",
+    "splax/_rasterize/_sort/_kernels.py",
+]
