@@ -8,6 +8,7 @@ readback.
 import warp as wp
 
 from splax._cache import begin_count_read, cached_launch, cached_scratch, fetch_count_read
+from splax._intersect import BLOCK_WIDTH
 from splax._rasterize._sort._kernels import (
     _MINMAX_CHUNK,
     _depth_minmax,
@@ -25,8 +26,7 @@ def _use_32bit_keys(depth_bits: int) -> bool:
     return depth_bits >= 16
 
 
-def _sort_and_bin(
-    device: wp.Device | None,
+def sort_and_bin(
     xys: wp.array,
     depths: wp.array,
     radii: wp.array,
@@ -35,17 +35,22 @@ def _sort_and_bin(
     cum_tiles_hit: wp.array,
     n: int,
     B: int,
-    tile_bounds_x: int,
-    tile_bounds_y: int,
-) -> tuple[wp.array, wp.array, int]:
+    img_h: int,
+    img_w: int,
+) -> tuple[wp.array, wp.array, int, int, int]:
     """Emit sorted intersection keys and tile bins for one batched launch.
 
-    Used by the forward blend and by the backward pass, which recomputes the
-    identical sort from the saved cum_tiles_hit. The sort is deterministic, so it
-    reproduces the forward gaussian_ids and tile_bins and the saved final_idx stays
-    valid. Returns (gaussian_ids, tile_bins, num_intersects), where gaussian_ids is
-    the full scratch buffer whose valid prefix is [0, num_intersects).
+    B is the geometry batch, how many distinct renders the sort covers. Used by the forward blend
+    and by the backward pass, which recomputes the identical sort from the saved cum_tiles_hit. The
+    sort is deterministic, so it reproduces the forward gaussian_ids and tile_bins and the saved
+    final_idx stays valid. Returns (gaussian_ids, tile_bins, num_intersects, tile_bounds_x,
+    num_tiles), where gaussian_ids is the full scratch buffer whose valid prefix is
+    [0, num_intersects).
     """
+    device = xys.device
+    bw = int(BLOCK_WIDTH)
+    tile_bounds_x = (img_w + bw - 1) // bw
+    tile_bounds_y = (img_h + bw - 1) // bw
     num_tiles = tile_bounds_x * tile_bounds_y
     # bits to index [0, num_tiles) and [0, B), the tile and image id fields of the sort key
     tile_n_bits = (num_tiles - 1).bit_length()
@@ -163,4 +168,4 @@ def _sort_and_bin(
             [num_intersects, isect_ids, num_tiles, tile_n_bits, tile_bins],
             device,
         )
-    return gaussian_ids, tile_bins, num_intersects
+    return gaussian_ids, tile_bins, num_intersects, tile_bounds_x, num_tiles

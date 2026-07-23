@@ -4,6 +4,6 @@ _kernels holds the Warp device kernels, _sort the host orchestration that launch
 one intersection-count readback.
 """
 
-from splax._rasterize._sort._sort import _sort_and_bin
+from splax._rasterize._sort._sort import sort_and_bin
 
-__all__ = ["_sort_and_bin"]
+__all__ = ["sort_and_bin"]

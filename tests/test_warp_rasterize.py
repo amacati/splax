@@ -368,10 +368,7 @@ def _id_viewmat(dz: float = 5.0) -> jax.Array:
 
 
 def test_render_lego_vs_gsplat(
-    gsplat_ref: ModuleType,
-    lego_meta: dict,
-    lego_view: Callable[[str], np.ndarray],
-    lego_ply: Path,
+    gsplat_ref: ModuleType, lego_meta: dict, lego_view: Callable[[str], np.ndarray], lego_ply: Path
 ) -> None:
     """Splax vs gsplat full render on the real lego scene, from a dataset pose.
 
@@ -455,7 +452,7 @@ def test_snugbox_emit_matches_count(n: int, H: int, W: int) -> None:
     tbx = (W + bw - 1) // bw
     tby = (H + bw - 1) // bw
     num_tiles = tbx * tby
-    tile_n_bits = (num_tiles - 1).bit_length()  # bits to index [0, num_tiles), see _sort_and_bin
+    tile_n_bits = (num_tiles - 1).bit_length()  # bits to index [0, num_tiles), see sort_and_bin
 
     dev = "cuda:0"
     xys_w = wp.array(np.asarray(xys), dtype=wp.vec2, device=dev)

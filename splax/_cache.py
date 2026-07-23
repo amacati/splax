@@ -76,8 +76,8 @@ def cached_scratch(
     if entry["isect_cap"] < isect_need or entry["isect_dtype"] != isect_dtype:
         # Grow the buffer with headroom to avoid reallocation for slighly larger counts.
         cap = max(int(isect_need * _SCRATCH_HEADROOM) + 1, entry["isect_cap"])
-        # Sort buffers move on realloc, so recorded launches must drop their
-        # references to the old buffers before the free below.
+        # Sort buffers move on realloc, so recorded launches must drop their references to the old
+        # buffers before the free below.
         _launch_cache.clear()
         # Free before allocating larger, avoiding an old plus new transient peak.
         entry["isect_ids"] = None

@@ -20,7 +20,7 @@ from warp import JaxCallableGraphMode, jax_callable
 from splax._batching import nested_vmap
 from splax._cache import cached_launch
 from splax._intersect import BLOCK_SIZE, BLOCK_WIDTH
-from splax._rasterize._sort import _sort_and_bin
+from splax._rasterize._sort import sort_and_bin
 
 wp.set_module_options({"fast_math": True})  # Fastmath significantly accelerates the kernels.
 
@@ -52,20 +52,14 @@ def _rasterize_warp(
     final_idx: wp.array2d[wp.int32],
     out_img: wp.array2d[wp.vec3],
 ) -> None:
-    # B is recovered from an output shape, always full batch under expand_dims
-    # (out_img collapses to (B*H, W)). N is static because vmap hides the batch
-    # axis from this wrapper.
     n = num_gaussians
-    B = out_img.shape[0] // img_h
+    B = out_img.shape[0] // img_h  # out_img collapses to (B*H, W) with batching, so we recover B
     sel_bg = background.shape[0] > 1
 
-    # Key emission uses map_opacities, the raw opacity projection counted with.
-    # The blend uses opacities, compensated in antialiased mode. When not
-    # antialiased the caller passes the same array for both.
-    gaussian_ids, tile_bins, _num_isect, tile_bounds_x, num_tiles = _blend_setup(
-        colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B, img_h, img_w
+    # sorting must use the same map_opacities as the forward blend to reproduce the order and index
+    gaussian_ids, tile_bins, _, tile_bounds_x, num_tiles = sort_and_bin(
+        xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B, img_h, img_w
     )
-
     cached_launch(
         _rasterize_kernel,
         B * num_tiles,
@@ -126,13 +120,7 @@ def _rasterize_kernel(
     final_idx: wp.array2d[wp.int32],
     out_img: wp.array2d[wp.vec3],
 ):
-    # Cooperative shared-memory blend. One 256-thread block per (image, tile) stages 256 gaussians
-    # per batch into shared memory, each thread gathering exactly one gaussian with a single masked
-    # shared write per tile. image_id = block // num_tiles decodes the batch element. Outputs are
-    # the collapsed batched buffers (B*H, W), written at row image_id*H + i. The gathered gaussian
-    # ids are flat (b*N + gid). xys and conics are batched, so the flat id indexes them directly,
-    # while broadcast size-N colors and opacities are shifted back via a per-thread modulo at gather
-    # time.
+    """Rasterization kernel with cooperative shared-memory blend."""
     tile_g, tr = wp.tid()  # launch_tiled: block index and thread rank
     image_id = tile_g // num_tiles
     tile_local = tile_g % num_tiles
@@ -147,8 +135,8 @@ def _rasterize_kernel(
     px = wp.float32(j) + 0.5
     py = wp.float32(i) + 0.5
 
-    # Threads mapping outside the image stay live for the collective loads and
-    # the block vote but are marked done and never write an output pixel.
+    # Threads mapping outside the image stay live for the collective loads and the block vote but
+    # are marked done and never write an output pixel.
     inside = (i < img_h) and (j < img_w)
     done = wp.bool(not inside)
 
@@ -161,28 +149,23 @@ def _rasterize_kernel(
     cur_idx = wp.int32(0)
     pix_out = wp.vec3(0.0, 0.0, 0.0)
 
-    # Colors are staged in their own tile so a rejected gaussian only ever touches
-    # its geometry record. The blend reads the color slot on acceptance alone.
+    # Colors are staged in their own tile so a rejected gaussian only loads its geometry record
     geo_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=_vec6, storage="shared")
     color_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=wp.vec3, storage="shared")
     done_tile = wp.tile_zeros(shape=1, dtype=wp.int32, storage="shared")
     counted = wp.bool(False)
 
+    # We chunk up all Gaussians in this tile into BLOCK_SIZE batches
     for b in range(num_batches):
-        # Whole-tile early-out vote, break once every thread in the block is done.
-        # Each thread bumps the shared counter once, when it first turns done, so
-        # the counter never needs resetting. The scatter's barrier doubles as the
-        # guard between the previous batch's reads and this batch's staging writes.
+        # If every thread in the block is done, we break early and skip the rest of the Gaussians.
+        # Double-acts as a sync barrier to ensure previous reads are complete before the next batch
         wp.tile_scatter_add(done_tile, 0, 1, done and not counted)
         counted = done
         if done_tile[0] >= BLOCK_SIZE:
             break
 
-        # Per-thread gather of one gaussian record. Broadcast size-N attributes
-        # must be read at the local gid, batched size B*N ones at the flat id.
-        # Modulo by the array's own leading dim does both. The tail lanes of the
-        # last batch clamp to the final intersection, staging a duplicate record
-        # the blend loop never reads because it stops at batch_size.
+        # Per-thread gather of one gaussian record with batch-aware indexing
+        #
         batch_start = range_start + b * BLOCK_SIZE
         src = wp.min(batch_start + tr, range_end - 1)
         g = gaussian_ids_sorted[src]
@@ -194,6 +177,7 @@ def _rasterize_kernel(
         )
         wp.tile_scatter_masked(color_tile, tr, colors[g % color_mod], True)
 
+        # The last batch gets clamped to the final intersection
         batch_size = wp.min(BLOCK_SIZE, range_end - batch_start)
         if not done:
             for t in range(batch_size):
@@ -240,14 +224,13 @@ def _rasterize_depth_warp(
     out_img: wp.array2d[wp.vec3],
     out_depth: wp.array2d[wp.float32],
 ) -> None:
-    # Depth-augmented twin of _rasterize_warp. Shares the exact sort and bin, so
-    # the blend order matches the plain path bit for bit.
+    # Depth-augmented version of _rasterize_warp
     n = num_gaussians
     B = out_img.shape[0] // img_h
     sel_bg = background.shape[0] > 1
 
-    gaussian_ids, tile_bins, _num_isect, tile_bounds_x, num_tiles = _blend_setup(
-        colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B, img_h, img_w
+    gaussian_ids, tile_bins, _, tile_bounds_x, num_tiles = sort_and_bin(
+        xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B, img_h, img_w
     )
 
     cached_launch(
@@ -291,15 +274,6 @@ _rasterize_depth_ffi = nested_vmap(
 )
 
 
-# Depth-augmented forward. The expected-depth channel
-# D(p) = sum_i w_i d_i with the alpha-blend weights w_i, for sparse-point depth
-# regularization. A separate kernel so the default render never pays for the
-# extra accumulator and load. Blend math, early-exit vote, staging, and batched
-# indexing are identical to _rasterize_kernel, with depth packed into the geometry
-# record. The packing matters: staging depth in a second vec4 tile alongside a
-# vec6 geometry tile ran the whole kernel 2x slower than the plain color blend,
-# while the 7-float record restores parity with it (bit-identical output).
-# Background depth is 0, so the depth channel has no T*bg term.
 @wp.kernel
 def _rasterize_depth_kernel(
     img_h: wp.int32,
@@ -323,6 +297,10 @@ def _rasterize_depth_kernel(
     out_img: wp.array2d[wp.vec3],
     out_depth: wp.array2d[wp.float32],
 ):
+    """Separate depth-augmented rasterization kernel to only compute expected depth if required.
+
+    Additional memory loads are expensive, so we avoid paying them in the default rasterizer.
+    """
     tile_g, tr = wp.tid()
     image_id = tile_g // num_tiles
     tile_local = tile_g % num_tiles
@@ -388,6 +366,7 @@ def _rasterize_depth_kernel(
                     break
                 vis = alpha * T
                 pix_out = pix_out + color_tile[t] * vis
+                # Also compute the expected depth with the alpha blend weights
                 depth_out = depth_out + s[6] * vis
                 T = next_T
                 cur_idx = batch_start + t
@@ -399,43 +378,6 @@ def _rasterize_depth_kernel(
         final_idx[row, j] = cur_idx
         out_img[row, j] = pix_out + T * bg
         out_depth[row, j] = depth_out
-
-
-def _blend_setup(
-    colors: wp.array,
-    xys: wp.array,
-    depths: wp.array,
-    radii: wp.array,
-    conics: wp.array,
-    map_opacities: wp.array,
-    cum_tiles_hit: wp.array,
-    n: int,
-    B_geom: int,
-    img_h: int,
-    img_w: int,
-) -> tuple[wp.array, wp.array, int, int, int]:
-    """Tile geometry plus the shared sort and bin build.
-
-    B_geom is the geometry batch, how many distinct renders the sort covers.
-    Returns (gaussian_ids, tile_bins, num_intersects, tile_bounds_x, num_tiles).
-    """
-    bw = int(BLOCK_WIDTH)
-    tile_bounds_x = (img_w + bw - 1) // bw
-    tile_bounds_y = (img_h + bw - 1) // bw
-    gaussian_ids, tile_bins, num_intersects = _sort_and_bin(
-        colors.device,
-        xys,
-        depths,
-        radii,
-        conics,
-        map_opacities,
-        cum_tiles_hit,
-        n,
-        B_geom,
-        tile_bounds_x,
-        tile_bounds_y,
-    )
-    return (gaussian_ids, tile_bins, num_intersects, tile_bounds_x, tile_bounds_x * tile_bounds_y)
 
 
 # region backward kernels
@@ -477,8 +419,8 @@ def _rasterize_bwd_warp(
     sel_bg = background.shape[0] > 1
     vout_rows = v_out_img.shape[0]
 
-    gaussian_ids, tile_bins, num_intersects, tile_bounds_x, num_tiles = _blend_setup(
-        colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B_geom, img_h, img_w
+    gaussian_ids, tile_bins, num_intersects, tile_bounds_x, num_tiles = sort_and_bin(
+        xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B_geom, img_h, img_w
     )
 
     # atomics accumulate, so outputs must start at zero
@@ -578,7 +520,7 @@ _rasterize_bwd_ffi = nested_vmap(
 # final_idx contribute, with the same sigma and alpha culling as the forward.
 #
 # The sort and bin structures are not saved from the forward. They are recomputed
-# from the saved cum_tiles_hit via the shared _sort_and_bin. The sort is
+# from the saved cum_tiles_hit via the shared sort_and_bin. The sort is
 # deterministic, so it reproduces the forward order and the saved final_Ts and
 # final_idx line up.
 #
@@ -884,8 +826,8 @@ def _rasterize_bwd_depth_warp(
     vout_rows = v_out_img.shape[0]
     vdepth_rows = v_out_depth.shape[0]
 
-    gaussian_ids, tile_bins, num_intersects, tile_bounds_x, num_tiles = _blend_setup(
-        colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B_geom, img_h, img_w
+    gaussian_ids, tile_bins, num_intersects, tile_bounds_x, num_tiles = sort_and_bin(
+        xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B_geom, img_h, img_w
     )
 
     v_colors.zero_()
